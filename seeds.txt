@@ -1,0 +1,25 @@
+# cl0q domain-crawler seed list
+# One start URL per line. Blank lines and #-comments are ignored. A bare host
+# (no scheme) is treated as https://. The crawler BFS-walks each of these to
+# -max-depth, harvesting every external domain it finds into domain_info.
+#
+# Edit freely — domain-crawler reads this file when it starts. To apply changes:
+#   docker compose up -d --build domain-crawler
+#
+# Picked for being link-rich AND bot-friendly (return real <a href> HTML, no 403
+# / JS wall). reddit.com is deliberately absent — it 403s our User-Agent.
+
+# --- tech-news / link aggregators (fresh outbound links to real sites) ---
+https://news.ycombinator.com/
+https://news.ycombinator.com/newest
+https://lobste.rs/
+https://dev.to/
+
+# --- GitHub discovery (repos -> project homepages, docs, demos) ---
+https://github.com/explore
+https://github.com/trending
+https://github.com/sindresorhus/awesome
+
+# --- reference / directories (broad, long-tail domain fan-out) ---
+https://en.wikipedia.org/wiki/Lists_of_websites
+https://curlie.org/

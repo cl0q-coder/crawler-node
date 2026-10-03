@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: CGO_ENABLED=0 go build ./...
+
+  schema:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: cl0q
+          POSTGRES_PASSWORD: cl0q
+          POSTGRES_DB: cl0q
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cl0q -d cl0q" --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - run: psql "postgres://cl0q:cl0q@localhost:5432/cl0q" -v ON_ERROR_STOP=1 -f initdb/01-schema.sql
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: compose file is valid
+        run: CL0Q_NODE_ID=ci-node NODE_TOKEN=x DB_PASSWORD=x docker compose config --quiet
+      - run: docker build -t cl0q-crawler-node:ci .

@@ -1,0 +1,677 @@
+package main
+
+// domain-crawler — a breadth-first link crawler that DISCOVERS new domains and adds them to domain_info.
+//
+//   [domain-crawler] → domain_info → website-crawler → website_info → cl0q-node forwards it to cl0q
+//
+// SEEDS: -seed (comma-separated) wins → else -seeds-file (SEEDS_FILE, default ./seeds.txt; "#" comments, a bare
+// host means https://) → else the built-in defaultSeeds. Each cycle also seeds -db-seeds random domains already in
+// domain_info, so discovery keeps finding new links instead of re-walking the same neighbourhood. -max-pages and
+// -queue-cap bound each cycle's memory.
+//
+// POLITENESS (what https://cl0q.com/bot promises site owners). None of it can be switched off: settings can only make
+// the crawler slower or gentler than the floors in the "Politeness floors" block below.
+//   * every request carries the node's User-Agent, which names its operator (package botid) — not configurable;
+//   * only public internet addresses are contacted (package netguard): never loopback, private networks,
+//     link-local / cloud-metadata or other reserved ranges;
+//   * robots.txt is always read first (package robotstxt): path rules (longest match, * and $ wildcards); a group
+//     naming cl0q-node or any other cl0q bot name beats "*"; Crawl-delay is honoured (capped at 30 s);
+//   * at most -per-host-pages (≤25) pages per site per cycle, at least -host-delay-ms (≥2 s) apart — robots.txt, its
+//     http fallback and redirect hops included (other sites are served while one waits);
+//   * redirects are followed only on the same host, at most 5 hops, each robots-checked and paced; a redirect to any
+//     other host is handed back to the queue, where it gets that host's own robots.txt and pacing;
+//   * login, admin, account, cart, search and query-string URLs and non-HTML files are never fetched;
+//   * a site that drops, resets or times out its robots.txt request is skipped for the cycle.
+//
+// Rows carry found_on (the page the domain was seen on). Inserts are deduplicated with WHERE NOT EXISTS
+// (domain_info.domain has a non-unique index) and written DB_BATCH at a time.
+//
+// SHUTDOWN: SIGTERM / SIGINT stop the cycle after the page in flight; discovered domains still buffered are written
+// before the process exits.
+//
+//   CL0Q_NODE_ID=my-node go run ./cmd/domain-crawler -seed https://example.com/ -max-depth 3
+
+import (
+	"context"
+	"database/sql"
+	"flag"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"os/signal"
+	"regexp"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/lib/pq"
+	"golang.org/x/net/html"
+
+	"cl0q/botid"
+	"cl0q/crawlutil"
+	"cl0q/dbresil"
+	"cl0q/netguard"
+	"cl0q/robotstxt"
+)
+
+func envOr(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+
+func envBool(k string, def bool) bool {
+	if v := os.Getenv(k); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
+		}
+	}
+	return def
+}
+
+func envInt(k string, def int) int {
+	if v := os.Getenv(k); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
+}
+
+var (
+	seedFlag      = flag.String("seed", os.Getenv("SEED_URL"), "comma-separated start URLs; overrides -seeds-file and the built-in defaults")
+	seedsFileFlag = flag.String("seeds-file", envOr("SEEDS_FILE", "seeds.txt"), "newline-delimited seed URL file (# comments ok)")
+	maxDepth      = flag.Int("max-depth", 4, "max BFS depth from the seed")
+	dsnFlag       = flag.String("dsn", envOr("DATABASE_URL", "postgres://cl0q:cl0q@localhost:5432/cl0q?sslmode=disable"), "PostgreSQL DSN")
+	idleFlag      = flag.Duration("idle", 60*time.Second, "pause before re-seeding when the queue drains")
+	maxPages      = flag.Int("max-pages", 5000, "max pages per BFS cycle before re-seeding (bounds memory)")
+	maxConns      = flag.Int("max-conns", 4, "max DB connections (BFS is sequential; capped for the shared 100-conn DB)")
+	dbSeedsN      = flag.Int("db-seeds", 200, "random existing domain_info domains added as seeds each cycle (0=off) — mines known domains for new outbound links to beat the fixed-seed plateau")
+	batchFlag     = flag.Int("db-batch", envInt("DB_BATCH", 200), "discovered domains buffered per INSERT (one commit) — fewer commits = far less remote DB load")
+	queueCap      = flag.Int("queue-cap", envInt("QUEUE_CAP", 50000), "max URLs queued at once (bounds BFS memory; 0=unbounded). Fan-out pages can otherwise push this to 500k+ and OOM the box.")
+	// A site gets at most perHostPages pages per cycle, at least hostDelayMs apart
+	// (or its robots Crawl-delay, if longer). Other sites' pages are served while one waits, so pacing costs
+	// little throughput.
+	hostDelayMs  = flag.Int("host-delay-ms", envInt("HOST_DELAY_MS", minHostDelayMs), "min gap between requests to the same host (at least 2000)")
+	perHostPages = flag.Int("per-host-pages", envInt("PER_HOST_PAGES", maxPerHostPages), "max pages fetched from one host per BFS cycle (at most 25)")
+)
+
+// Politeness floors. Settings can only make the crawler slower or gentler than these (see the header).
+const (
+	minHostDelayMs  = 2000             // between requests to one host
+	maxPerHostPages = 25               // pages per site per cycle
+	minIdle         = 60 * time.Second // pause before a new cycle re-seeds (seeds are re-fetched every cycle)
+	maxRedirects    = 5                // redirect hops followed, same host only
+)
+
+// robotsCache maps host -> parsed rules, filled during a cycle and reset at the top of each cycle (bounds memory).
+// The BFS loop is single-goroutine, so no lock is needed.
+var robotsCache = map[string]*robotRules{}
+
+// robotRules is one host's robots.txt verdict (see package robotstxt), plus whether the site refused the robots.txt
+// request outright.
+type robotRules struct {
+	*robotstxt.Rules
+	blocked bool // the robots request was dropped/reset/timed out → the site is refusing us: skip it this cycle
+}
+
+// allows reports whether u may be fetched (a nil verdict allows everything).
+func (r *robotRules) allows(u *url.URL) bool { return r == nil || r.Rules.Allows(u) }
+
+// parseRobots parses a robots.txt body.
+func parseRobots(body string) *robotRules { return &robotRules{Rules: robotstxt.Parse(body)} }
+
+// sameSite reports whether two hosts belong to the same registrable site (example.com and www.example.com do;
+// a.co.ke and b.co.ke don't). Hosts with no registrable site (IP addresses) match only themselves.
+func sameSite(a, b string) bool {
+	ra, rb := crawlutil.Registrable(a), crawlutil.Registrable(b)
+	if ra == "" || rb == "" {
+		return strings.EqualFold(a, b)
+	}
+	return ra == rb
+}
+
+// fetchRobotsRules GETs https://host/robots.txt; plain http is tried only when https isn't offered, after the same
+// per-host gap as any other request. A dropped, reset or timed-out request marks the host blocked for the cycle.
+// Missing / 4xx robots.txt → allow everything. Redirects stay on the same site (at most maxRedirects, each paced).
+func fetchRobotsRules(host string, gap time.Duration) *robotRules {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	client := *httpClient
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects || !sameSite(req.URL.Hostname(), via[0].URL.Hostname()) {
+			return http.ErrUseLastResponse
+		}
+		time.Sleep(gap)
+		return nil
+	}
+	for _, scheme := range []string{"https://", "http://"} {
+		if scheme == "http://" {
+			time.Sleep(gap) // the fallback is a second request to the same server: pace it
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, scheme+host+"/robots.txt", nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", userAgent)
+		resp, err := client.Do(req)
+		if err != nil {
+			if ctx.Err() != nil || !crawlutil.HTTPSUnavailable(err) {
+				return &robotRules{blocked: true}
+			}
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, robotstxt.MaxBytes))
+		resp.Body.Close()
+		if resp.StatusCode >= 400 {
+			return &robotRules{}
+		}
+		return parseRobots(string(body))
+	}
+	return &robotRules{}
+}
+
+// skipURL: links we never follow — anything with a query string (search, filters, calendars, form endpoints),
+// non-HTML files, and account/admin/checkout/search-style paths that WAFs and fail2ban watch for brute forcing.
+var skipPathRE = regexp.MustCompile(`(?i)(^|/)(wp-login\.php|wp-admin|wp-json|xmlrpc\.php|login|log-in|logout|signin|sign-in|signup|sign-up|register|account|my-account|cart|checkout|basket|admin|administrator|auth|oauth|password|reset-password|search|cgi-bin|phpmyadmin)(/|$|\.)`)
+var skipExtRE = regexp.MustCompile(`(?i)\.(pdf|zip|gz|tgz|tar|rar|7z|exe|dmg|msi|iso|apk|jpe?g|png|gif|webp|svg|ico|bmp|tiff?|mp3|mp4|m4a|mov|avi|webm|wav|ogg|css|js|json|xml|rss|atom|txt|csv|docx?|xlsx?|pptx?)$`)
+
+func skipURL(u *url.URL) bool {
+	return u.RawQuery != "" || skipExtRE.MatchString(u.Path) || skipPathRE.MatchString(u.Path)
+}
+
+// defaultSeeds — fallback used only when neither -seed nor a readable -seeds-file
+// is given (keeps the crawler working even if seeds.txt goes missing). The real,
+// editable list lives in seeds.txt; keep these two in rough sync. Diverse on
+// purpose: tech-news aggregators, GitHub discovery pages, a huge "awesome" link
+// list, Wikipedia, and the Curlie web directory.
+var defaultSeeds = []string{
+	"https://news.ycombinator.com/",
+	"https://news.ycombinator.com/newest",
+	"https://lobste.rs/",
+	"https://dev.to/",
+	"https://github.com/explore",
+	"https://github.com/trending",
+	"https://github.com/sindresorhus/awesome",
+	"https://en.wikipedia.org/wiki/Lists_of_websites",
+	"https://curlie.org/",
+}
+
+// loadSeeds resolves the seed list: explicit -seed (comma-separated) wins, else
+// the seeds file (one URL per line, # comments), else the baked-in defaults.
+func loadSeeds() []string {
+	clean := func(parts []string) []string {
+		var out []string
+		seen := map[string]bool{}
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "" || strings.HasPrefix(p, "#") {
+				continue
+			}
+			if !strings.HasPrefix(p, "http://") && !strings.HasPrefix(p, "https://") {
+				p = "https://" + p
+			}
+			if u, err := url.Parse(p); err == nil {
+				u.Host = strings.ToLower(u.Host) // EXAMPLE.com and example.com are one site
+				p = u.String()
+			}
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+	if s := strings.TrimSpace(*seedFlag); s != "" {
+		if seeds := clean(strings.Split(s, ",")); len(seeds) > 0 {
+			return seeds
+		}
+	}
+	if *seedsFileFlag != "" {
+		if data, err := os.ReadFile(*seedsFileFlag); err == nil {
+			if seeds := clean(strings.Split(string(data), "\n")); len(seeds) > 0 {
+				log.Printf("[INFO] loaded %d seeds from %s", len(seeds), *seedsFileFlag)
+				return seeds
+			}
+		} else {
+			log.Printf("[INFO] seeds file %s not usable (%v) — using built-in defaults", *seedsFileFlag, err)
+		}
+	}
+	return defaultSeeds
+}
+
+// sampleDomains pulls up to n random existing domains from domain_info to use as
+// extra per-cycle seeds — turning the millions of already-known domains into a
+// rotating frontier whose homepages we re-crawl for NEW outbound domains. This is
+// what breaks the fixed-seed dedup plateau. TABLESAMPLE keeps it cheap (samples a
+// few blocks, no full scan / no ORDER BY random() across the whole table).
+func sampleDomains(db *sql.DB, n int) []string {
+	if n <= 0 {
+		return nil
+	}
+	rows, err := db.Query(`SELECT domain FROM domain_info TABLESAMPLE SYSTEM (0.2)
+	                       WHERE coalesce(domain,'') <> '' ORDER BY random() LIMIT $1`, n)
+	if err != nil {
+		log.Printf("[WARN] db-seed sample: %v", err)
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var d string
+		if rows.Scan(&d) == nil {
+			if d = strings.TrimSpace(d); d != "" {
+				out = append(out, "https://"+d+"/")
+			}
+		}
+	}
+	return out
+}
+
+// userAgent is set once in main from botid (names the node operator; not configurable).
+var userAgent string
+
+// httpClient refuses non-public addresses at connect time (netguard sees the resolved IP of every attempt) and never
+// uses a proxy, so the check can't be bypassed through one. Each fetch sets its own redirect policy.
+var httpClient = &http.Client{
+	Timeout: 15 * time.Second,
+	Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 8 * time.Second, KeepAlive: 30 * time.Second, Control: netguard.Control}).DialContext,
+		TLSHandshakeTimeout:   8 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
+		MaxIdleConnsPerHost:   2,
+		IdleConnTimeout:       30 * time.Second,
+		ForceAttemptHTTP2:     true,
+	},
+	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+}
+
+func main() {
+	flag.Parse()
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	userAgent = botid.MustUserAgent()
+	// Politeness floors: a setting can only make the crawler gentler.
+	*hostDelayMs = max(*hostDelayMs, minHostDelayMs)
+	*perHostPages = min(max(*perHostPages, 1), maxPerHostPages)
+	*idleFlag = max(*idleFlag, minIdle)
+	if *batchFlag < 1 {
+		*batchFlag = 1
+	}
+
+	db, err := sql.Open("postgres", dbresil.WithConnectTimeout(*dsnFlag, 10))
+	if err != nil {
+		log.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if dbresil.WaitForRemoteCtx(ctx, db) != nil { // wait out a database outage at startup instead of crash-looping
+		return
+	}
+	// Shared DB has max_connections=100; this BFS is single-threaded, so a small
+	// cap is plenty and guarantees we never contribute to "too many clients".
+	db.SetMaxOpenConns(*maxConns)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(5 * time.Minute)
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS domain_info (
+		id SERIAL PRIMARY KEY, domain TEXT, ip_addresses_ipv4 TEXT, ip_addresses_ipv6 TEXT,
+		mx_records TEXT, cname TEXT, found_on TEXT, crawled_at TIMESTAMP)`); err != nil {
+		log.Fatalf("ensure domain_info: %v", err)
+	}
+	// key/value runtime settings (e.g. crawl_subdomains = on to follow subdomains).
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS cl0q_settings (key TEXT PRIMARY KEY, value TEXT)`); err != nil {
+		log.Printf("[WARN] ensure cl0q_settings: %v", err)
+	}
+
+	host := "?"
+	if u, e := url.Parse(*dsnFlag); e == nil {
+		host = u.Host
+	}
+	fixedSeeds := loadSeeds()
+	log.Printf("[INFO] domain-crawler: %d fixed seeds + %d db-seeds/cycle, max-depth=%d, max-pages=%d -> domain_info @ %s", len(fixedSeeds), *dbSeedsN, *maxDepth, *maxPages, host)
+	log.Printf("[INFO] politeness: host_delay=%s per_host_pages=%d idle=%s max_redirects=%d robots=always", time.Duration(*hostDelayMs)*time.Millisecond, *perHostPages, *idleFlag, maxRedirects)
+	for i, s := range fixedSeeds {
+		log.Printf("[INFO]   seed[%d] %s", i, s)
+	}
+	// Optional local outbox: when the database is down, spool discovered domains to SPOOL_DATABASE_URL instead of
+	// dropping them, for a separate drain job to replay. Not used by the node build (nil = disabled when unset).
+	spoolCap := envInt("SPOOL_MAX_ROWS", 500000)
+	spool := dbresil.Open(os.Getenv("SPOOL_DATABASE_URL"), spoolCap)
+	if spool != nil {
+		log.Printf("[INFO] spool: local outbox enabled (cap %d rows)", spoolCap)
+	}
+
+	type item struct {
+		url   string
+		depth int
+	}
+
+	crawlSubs := false     // persists across cycles so a DB blip keeps the last-known value, not apex-only
+	for ctx.Err() == nil { // re-seed until shutdown (continuous discovery)
+		if dbresil.WaitForRemoteCtx(ctx, db) != nil { // ride out an outage instead of a wasted BFS cycle that drops everything
+			break
+		}
+		// Apex-only vs include-subdomains is operator-controlled (cl0q_settings key crawl_subdomains).
+		// Default apex-only: subdomain platforms (blogspot/tumblr/...) link thousands of
+		// sibling subdomains per page, which previously exploded the BFS queue past 500k
+		// URLs and OOM'd the box. Apex-only skips those links entirely, killing the fan-out.
+		crawlSubs = crawlutil.LoadCrawlSubdomains(db, crawlSubs)
+		// Fixed seeds + a fresh random sample of known domains each cycle, so we keep
+		// exploring new neighbourhoods of the 2.5M-domain frontier instead of just
+		// re-walking the same fixed seeds (which plateaus once they're exhausted).
+		seeds := append([]string{}, fixedSeeds...)
+		if extra := sampleDomains(db, *dbSeedsN); len(extra) > 0 {
+			seeds = append(seeds, extra...)
+			log.Printf("[INFO] cycle seeds: %d fixed + %d sampled from domain_info (crawl_subdomains=%v)", len(fixedSeeds), len(extra), crawlSubs)
+		}
+		robotsCache = map[string]*robotRules{} // fresh robots rules each cycle (bounds memory)
+		visited := map[string]bool{}
+		hostLast := map[string]time.Time{} // last request (robots or page) per host this cycle
+		hostPages := map[string]int{}      // pages fetched per host this cycle (capped at -per-host-pages)
+		hostQueued := map[string]int{}     // URLs queued per host (don't fill the queue with a capped site)
+		deferred := 0                      // consecutive queue items pushed back because their host wasn't due yet
+		seenDomain := map[string]bool{}
+		queue := make([]item, 0, len(seeds))
+		for _, s := range seeds {
+			if visited[s] {
+				continue
+			}
+			// Apex-only: don't even seed from a subdomain — its links are sibling subdomains
+			// we'd filter anyway, so it just wastes a fetch.
+			if !crawlSubs {
+				if u, err := url.Parse(s); err == nil && crawlutil.IsSubdomain(u.Hostname()) {
+					continue
+				}
+			}
+			visited[s] = true
+			queue = append(queue, item{s, 0})
+		}
+		var discovered, inserted, pages int
+		lastBeat := time.Now()
+		// Buffer discovered domains and insert them in batches of *batchFlag (one commit per
+		// batch instead of one per domain) — the main reduction in remote-Postgres load.
+		buf := make([]pendDomain, 0, *batchFlag)
+		flush := func() { inserted += flushDomains(db, spool, buf); buf = buf[:0] }
+
+		for len(queue) > 0 && ctx.Err() == nil {
+			// Time-based heartbeat at the TOP of the loop: robots fetches, deferrals and skips `continue` before the
+			// page-count heartbeat below, and a fresh cycle fetches every seed's robots.txt before its first page —
+			// without this the log went quiet for minutes and the health check would read it as a stall.
+			if time.Since(lastBeat) >= 45*time.Second {
+				log.Printf("[INFO] pages=%d queue=%d domains_seen=%d new_inserted=%d robots_checked=%d", pages, len(queue), discovered, inserted, len(robotsCache))
+				lastBeat = time.Now()
+			}
+			cur := queue[0]
+			queue = queue[1:]
+			cu, err := url.Parse(cur.url)
+			if err != nil || cu.Hostname() == "" {
+				continue
+			}
+			host := strings.ToLower(cu.Hostname())
+			if hostPages[host] >= *perHostPages || (cur.depth > 0 && skipURL(cu)) {
+				continue
+			}
+			rules := robotsCache[host]
+			gap := time.Duration(*hostDelayMs) * time.Millisecond
+			if rules != nil && rules.Delay() > gap {
+				gap = rules.Delay()
+			}
+			if wait := gap - time.Since(hostLast[host]); wait > 0 {
+				if deferred < len(queue) { // another site is ready → serve it first, come back to this one
+					queue = append(queue, cur)
+					deferred++
+					continue
+				}
+				if !dbresil.SleepCtx(ctx, wait) { // every queued URL is waiting on its site's gap → wait this one out
+					break
+				}
+			}
+			deferred = 0
+			if rules == nil {
+				// First contact with this site this cycle: robots.txt is its own (paced) request; the page waits
+				// behind the gap like any other — no back-to-back robots+page hits.
+				rules = fetchRobotsRules(host, gap)
+				robotsCache[host] = rules
+				hostLast[host] = time.Now()
+				if !rules.blocked && rules.allows(cu) {
+					queue = append(queue, cur)
+				}
+				continue
+			}
+			if rules != nil && (rules.blocked || !rules.allows(cu)) {
+				continue
+			}
+			pages++
+			hostPages[host]++
+			links := safeCrawl(cur.url, rules, gap)
+			hostLast[host] = time.Now()
+			for _, raw := range links {
+				dom, full := resolveLink(raw, cur.url)
+				reg := crawlutil.Registrable(dom)
+				if reg == "" {
+					continue // no link, an IP, or a bare public suffix (co.ke) — never a site
+				}
+				// Apex-only: FOLD a subdomain link to its registrable site (blog.acme.com → acme.com,
+				// news.nation.co.ke → nation.co.ke) rather than dropping it — captures the parent apex (breadth)
+				// WITHOUT re-introducing fan-out (one apex per family, deduped by seenDomain). full="" so we
+				// don't BFS the subdomain URL itself; the apex is crawled by website-crawler.
+				if !crawlSubs && crawlutil.IsSubdomain(dom) {
+					dom = reg
+					full = ""
+				}
+				if !seenDomain[dom] {
+					seenDomain[dom] = true
+					discovered++
+					buf = append(buf, resolveDomain(dom, cur.url))
+					if len(buf) >= *batchFlag {
+						flush()
+					}
+				}
+				// Bounded enqueue: stop growing the frontier past -queue-cap so a fan-out
+				// burst can't balloon the queue/visited maps and OOM the box.
+				if full != "" && cur.depth < *maxDepth && !visited[full] && hostQueued[dom] < *perHostPages &&
+					(*queueCap <= 0 || len(queue) < *queueCap) {
+					if fu, err := url.Parse(full); err == nil && !skipURL(fu) {
+						visited[full] = true
+						hostQueued[strings.ToLower(fu.Hostname())]++
+						queue = append(queue, item{full, cur.depth + 1})
+					}
+				}
+			}
+			// Every 50 pages OR every 45s — the time-based heartbeat keeps the log
+			// advancing during slow (DNS-bound) deep crawls so the health check sees
+			// the crawler is alive within its 5-min window.
+			if pages%50 == 0 || time.Since(lastBeat) >= 45*time.Second {
+				log.Printf("[INFO] pages=%d queue=%d domains_seen=%d new_inserted=%d", pages, len(queue), discovered, inserted)
+				lastBeat = time.Now()
+			}
+			if pages >= *maxPages {
+				log.Printf("[INFO] page cap %d reached (queue had %d) — re-seeding to free memory", *maxPages, len(queue))
+				break
+			}
+		}
+		flush() // flush the cycle's remaining buffered domains
+		if ctx.Err() != nil {
+			break
+		}
+		log.Printf("[INFO] crawl drained: pages=%d domains_seen=%d new_inserted=%d — re-seeding in %s", pages, discovered, inserted, *idleFlag)
+		dbresil.SleepCtx(ctx, *idleFlag)
+	}
+	log.Printf("[INFO] stopped: shutdown signal received, buffered domains written")
+}
+
+// safeCrawl fetches pageURL and returns its <a href> links; recovers from parser panics. Redirects are followed only
+// on the same host, when robots.txt allows the target and it isn't a skipped URL, each after gap; any other redirect
+// target is returned as a link, so the BFS fetches it later under that host's own robots.txt and pacing.
+func safeCrawl(pageURL string, rules *robotRules, gap time.Duration) (links []string) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[WARN] panic crawling %s: %v", pageURL, r)
+			links = nil
+		}
+	}()
+	// robots.txt (rules, Crawl-delay, blocked sites) and per-host pacing are enforced by the BFS loop before this.
+	req, err := http.NewRequest(http.MethodGet, pageURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("Accept", "text/html,application/xhtml+xml")
+	client := *httpClient
+	client.CheckRedirect = func(r *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects || !strings.EqualFold(r.URL.Hostname(), via[0].URL.Hostname()) ||
+			!rules.allows(r.URL) || skipURL(r.URL) {
+			return http.ErrUseLastResponse
+		}
+		time.Sleep(gap) // a hop is another request to the same host
+		return nil
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	// Bodies we don't parse are still read (up to 1 MiB) so the connection can be reused for this site's next page.
+	drain := func() { io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20)) }
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		drain()
+		if loc, err := resp.Location(); err == nil {
+			return []string{loc.String()}
+		}
+		return nil
+	}
+	if !strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		drain()
+		return nil
+	}
+	z := html.NewTokenizer(io.LimitReader(resp.Body, 5<<20))
+	for {
+		switch z.Next() {
+		case html.ErrorToken:
+			return links
+		case html.StartTagToken, html.SelfClosingTagToken:
+			t := z.Token()
+			if t.Data == "a" {
+				for _, a := range t.Attr {
+					if a.Key == "href" {
+						links = append(links, a.Val)
+						break
+					}
+				}
+			}
+		}
+	}
+}
+
+func resolveLink(raw, base string) (domain, full string) {
+	b, err := url.Parse(base)
+	if err != nil {
+		return "", ""
+	}
+	p, err := b.Parse(raw)
+	if err != nil {
+		return "", ""
+	}
+	if p.Scheme != "http" && p.Scheme != "https" {
+		return "", ""
+	}
+	host := strings.ToLower(p.Hostname())
+	if host == "" || net.ParseIP(host) != nil {
+		return "", "" // an IP-literal link is never a site to discover
+	}
+	p.Host = strings.ToLower(p.Host) // EXAMPLE.com/x and example.com/x are one page
+	return host, p.String()
+}
+
+// pendDomain is a DNS-resolved domain buffered for a batched insert.
+type pendDomain struct {
+	domain, v4, v6, mx, cname, foundOn string
+}
+
+// dnsTimeout bounds each lookup in resolveDomain: the BFS is single-threaded, so one slow resolver must not stall
+// discovery. A lookup that times out leaves its field empty; dns-enricher fills it in later.
+const dnsTimeout = 3 * time.Second
+
+// resolveDomain best-effort DNS-resolves a domain and returns the row to insert (empty fields
+// when a lookup fails — the domain is still recorded).
+func resolveDomain(domain, foundOn string) pendDomain {
+	lookup := func(fn func(context.Context)) {
+		ctx, cancel := context.WithTimeout(context.Background(), dnsTimeout)
+		defer cancel()
+		fn(ctx)
+	}
+	var v4, v6, mxList []string
+	var cname string
+	lookup(func(ctx context.Context) {
+		if ips, err := net.DefaultResolver.LookupIPAddr(ctx, domain); err == nil {
+			for _, ip := range ips {
+				if ip.IP.To4() != nil {
+					v4 = append(v4, ip.IP.String())
+				} else {
+					v6 = append(v6, ip.IP.String())
+				}
+			}
+		}
+	})
+	lookup(func(ctx context.Context) {
+		if mxs, err := net.DefaultResolver.LookupMX(ctx, domain); err == nil {
+			for _, mx := range mxs {
+				mxList = append(mxList, mx.Host)
+			}
+		}
+	})
+	lookup(func(ctx context.Context) { cname, _ = net.DefaultResolver.LookupCNAME(ctx, domain) })
+	return pendDomain{domain, strings.Join(v4, ","), strings.Join(v6, ","), strings.Join(mxList, ","), cname, foundOn}
+}
+
+// flushDomains inserts a buffer of resolved domains in ONE statement (a 6-array unnest with the
+// same NOT EXISTS dedup) instead of one autocommit INSERT per domain. domain_info.domain is not
+// unique, so NOT EXISTS is the dedup; the per-cycle seenDomain map already prevents in-batch dups.
+// Returns how many NEW rows were inserted.
+const diInsertSQL = `
+	INSERT INTO domain_info (domain, ip_addresses_ipv4, ip_addresses_ipv6, mx_records, cname, found_on, crawled_at)
+	SELECT t.d, t.v4, t.v6, t.mx, t.cn, t.fo, now()
+	FROM unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[],$6::text[]) AS t(d,v4,v6,mx,cn,fo)
+	WHERE NOT EXISTS (SELECT 1 FROM domain_info di WHERE di.domain = t.d)`
+
+func flushDomains(remote *sql.DB, spool *dbresil.Spooler, batch []pendDomain) int {
+	if len(batch) == 0 {
+		return 0
+	}
+	d := make([]string, len(batch))
+	v4 := make([]string, len(batch))
+	v6 := make([]string, len(batch))
+	mx := make([]string, len(batch))
+	cn := make([]string, len(batch))
+	fo := make([]string, len(batch))
+	for i, p := range batch {
+		d[i], v4[i], v6[i], mx[i], cn[i], fo[i] = p.domain, p.v4, p.v6, p.mx, p.cname, p.foundOn
+	}
+	args := []interface{}{pq.Array(d), pq.Array(v4), pq.Array(v6), pq.Array(mx), pq.Array(cn), pq.Array(fo)}
+	res, err := remote.Exec(diInsertSQL, args...)
+	if err != nil {
+		// remote down? spool to the local outbox instead of dropping the discovered domains.
+		if spool != nil && dbresil.IsDown(remote, err) {
+			if spool.OverCap("domain_info") {
+				log.Printf("[WARN] spool over capacity — dropping %d discovered domain(s)", len(batch))
+				return 0
+			}
+			sres, serr := spool.DB().Exec(diInsertSQL, args...)
+			if serr != nil {
+				log.Printf("[ERROR] spool insert: %v", serr)
+				return 0
+			}
+			n, _ := sres.RowsAffected()
+			log.Printf("[INFO] remote down — spooled %d discovered domain(s) to local outbox", len(batch))
+			return int(n)
+		}
+		log.Printf("[ERROR] batch insert %d domain(s): %v", len(batch), err)
+		return 0
+	}
+	n, _ := res.RowsAffected()
+	return int(n)
+}

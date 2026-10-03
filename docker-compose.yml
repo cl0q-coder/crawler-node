@@ -1,0 +1,95 @@
+# cl0q crawler node: a local Postgres, the crawl pipeline, and cl0q-node, which sends the results to cl0q.
+#
+#   cp .env.example .env     # set CL0Q_NODE_ID, NODE_TOKEN and DB_PASSWORD (IPINFO_TOKEN optional)
+#   docker compose up -d --build
+#   docker compose logs -f website-crawler node
+#
+# Nothing listens on a public port. Every request the crawlers make carries
+#   Mozilla/5.0 (compatible; cl0q-node/1.0; operator=<CL0Q_NODE_ID>; +https://cl0q.com/bot)
+
+x-db-url: &db_url "postgres://cl0q:${DB_PASSWORD:?set DB_PASSWORD in .env}@db:5432/cl0q?sslmode=disable"
+
+x-node-env: &node_env
+  DATABASE_URL: *db_url
+  CL0Q_NODE_ID: "${CL0Q_NODE_ID:?set CL0Q_NODE_ID in .env (the node id you enrolled with)}"
+
+x-svc: &svc
+  build: .
+  image: cl0q-crawler-node:local
+  restart: unless-stopped
+  stop_grace_period: 30s   # on stop, each service finishes what it's doing and writes it before exiting
+  depends_on:
+    db:
+      condition: service_healthy
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "3" }
+
+services:
+  db:
+    image: postgres:18
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cl0q
+      POSTGRES_PASSWORD: "${DB_PASSWORD:?set DB_PASSWORD in .env}"
+      POSTGRES_DB: cl0q
+    volumes:
+      - pgdata:/var/lib/postgresql             # postgres 18 keeps its data in a versioned subdirectory
+      - ./initdb:/docker-entrypoint-initdb.d:ro  # schema, applied once to an empty volume
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cl0q -d cl0q"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Discovers new domains by following links from seeds.txt and from domains already known.
+  domain-crawler:
+    <<: *svc
+    command: ["/usr/local/bin/domain-crawler"]
+    environment:
+      <<: *node_env
+      SEEDS_FILE: /app/seeds.txt
+
+  # Fetches each domain's homepage (robots.txt first) and stores title, description, language, links…
+  website-crawler:
+    <<: *svc
+    stop_grace_period: 60s   # a fetch in flight can be waiting out a site's Crawl-delay (up to 30 s)
+    command: ["/usr/local/bin/website-crawler"]
+    environment:
+      <<: *node_env
+      LOOP: "1"
+      USE_CRAWL_STATE: "1"
+      WORKERS: "${CRAWL_WORKERS:-8}"
+      RECRAWL_DAYS: "120"
+
+  # Resolves IPs / MX / CNAME for newly found domains (DNS only, no HTTP).
+  dns-enricher:
+    <<: *svc
+    command: ["/usr/local/bin/dns-enricher"]
+    environment:
+      <<: *node_env
+      LOOP: "1"
+
+  # Looks up each site's network (ASN) so the crawler can spread load across hosting providers.
+  # Exits cleanly when IPINFO_TOKEN is empty, hence restart on failure only.
+  asn-enricher:
+    <<: *svc
+    restart: on-failure
+    command: ["/usr/local/bin/asn-enricher"]
+    environment:
+      <<: *node_env
+      LOOP: "1"
+      IPINFO_TOKEN: "${IPINFO_TOKEN:-}"
+
+  # Sends new rows to cl0q's ingest API with this node's token.
+  node:
+    <<: *svc
+    command: ["/usr/local/bin/cl0q-node", "-interval", "60s", "-batch", "100"]
+    environment:
+      LOCAL_DATABASE_URL: *db_url
+      CL0Q_NODE_ID: "${CL0Q_NODE_ID:?set CL0Q_NODE_ID in .env (the node id you enrolled with)}"
+      INGEST_URL: "${INGEST_URL:-https://cl0q.com}"
+      NODE_TOKEN: "${NODE_TOKEN:?set NODE_TOKEN in .env (shown once when your node was enrolled)}"
+
+volumes:
+  pgdata: {}

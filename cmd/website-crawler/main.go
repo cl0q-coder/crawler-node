@@ -138,9 +138,18 @@ func throttle(gates *sync.Map, key string, delay time.Duration) {
 		}
 		g := gi.(*hostGate)
 		g.mu.Lock()
-		if g.dead { // pruned after we loaded it: its idle time already exceeded any wait, use the fresh gate
+		if g.dead {
+			// The gate was marked dead but is still in the map (prune's delete
+			// raced us or hasn't run yet). Swap in a fresh gate instead of
+			// spinning on the dead one forever. Zero last = no wait: a new
+			// gate has no prior request to pace against.
 			g.mu.Unlock()
-			continue
+			fresh := &hostGate{}
+			if !gates.CompareAndSwap(key, g, fresh) {
+				continue // someone else replaced it; reload
+			}
+			g = fresh
+			g.mu.Lock()
 		}
 		if wait := delay - time.Since(g.last); wait > 0 {
 			time.Sleep(wait)

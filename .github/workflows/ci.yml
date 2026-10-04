@@ -36,6 +36,39 @@ jobs:
       - uses: actions/checkout@v4
       - run: psql "postgres://cl0q:cl0q@localhost:5432/cl0q" -v ON_ERROR_STOP=1 -f initdb/01-schema.sql
 
+  # N1: Vendored-copy drift guard. Fails if botid/netguard/robotstxt
+  # differ from the pinned commits in vendor-pins.txt.
+  vendor-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: check vendored copies match pins
+        run: |
+          while read -r pkg sha url; do
+            [[ "$pkg" =~ ^#.*$ ]] && continue
+            [ -z "$pkg" ] && continue
+            echo "Checking $pkg @ $sha..."
+            tmp=$(mktemp -d)
+            git clone -q "$url" "$tmp/$pkg"
+            (cd "$tmp/$pkg" && git checkout -q "$sha")
+            # Compare only .go files (ignore .git, .github, docs)
+            drift=0
+            for f in "$pkg"/*.go; do
+              base=$(basename "$f")
+              if ! diff -q "$f" "$tmp/$pkg/$base" > /dev/null 2>&1; then
+                echo "  Differ: $base"
+                drift=1
+              fi
+            done
+            if [ $drift -ne 0 ]; then
+              echo "DRIFT DETECTED in $pkg: vendored copy differs from $sha"
+              echo "Run ./sync-vendor.sh $pkg to update"
+              exit 1
+            fi
+            rm -rf "$tmp"
+            echo "  $pkg OK"
+          done < vendor-pins.txt
+
   docker:
     runs-on: ubuntu-latest
     steps:

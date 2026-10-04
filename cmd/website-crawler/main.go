@@ -657,6 +657,11 @@ func main() {
 	// and skip the download+parse when the server answers 304.
 	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS etag TEXT`)
 	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS last_modified TEXT`)
+	// source_node tracks which node first authored the row (used by "purge a bad
+	// node" deletes). The upserts reference it, so a binary-created DB (no
+	// docker initdb) must have the column too — otherwise prepare fails at
+	// startup.
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS source_node TEXT`)
 
 	// Upsert refreshes data + crawled_at on re-crawl.
 	upsert, err := db.Prepare(`
@@ -700,6 +705,10 @@ func main() {
 		added_at TIMESTAMPTZ NOT NULL DEFAULT now())`); err != nil {
 		log.Printf("ensure cl0q_blacklist: %v", err)
 	}
+	// loadBlacklist queries coalesce(kind,'keyword'); the binary's own CREATE
+	// TABLE above never created the column, so fresh installs silently ran with
+	// an empty blacklist.
+	_, _ = db.Exec(`ALTER TABLE cl0q_blacklist ADD COLUMN IF NOT EXISTS kind TEXT`)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS cl0q_settings (key TEXT PRIMARY KEY, value TEXT)`); err != nil {
 		log.Printf("ensure cl0q_settings: %v", err)
 	}

@@ -1842,6 +1842,62 @@ func crawlOne(t target) result {
 	}
 }
 
+// errRobotsDisallowed is returned by crawlOneURL when robots.txt disallows the crawl.
+var errRobotsDisallowed = errors.New("robots.txt disallows /")
+
+// crawlOneURL is the testable single-URL crawl entrypoint (H1 e2e). It runs the
+// real pipeline for one URL: robots.txt verdict via robotsFor, fetch+parse via
+// fetchWebsiteInfo through the netguard-guarded transport (including the
+// 429/503 retry), and persist via flushBatchTx. Production crawls use
+// crawlOne(target), which layers DNS/frontier/throttle/breaker concerns on top;
+// this entrypoint skips those so tests can drive the pipeline against fake
+// origins directly.
+func crawlOneURL(ctx context.Context, db *sql.DB, rawURL string) (*WebsiteInfo, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, fmt.Errorf("parse url: %w", err)
+	}
+	host := u.Host
+	if host == "" {
+		return nil, fmt.Errorf("url %q has no host", rawURL)
+	}
+	ri := robotsFor(host, "")
+	if ri.blockErr != nil {
+		return nil, ri.blockErr
+	}
+	if !ri.allowed {
+		return nil, errRobotsDisallowed
+	}
+	throttleBudget := throttleRetries
+	for {
+		info, err := fetchWebsiteInfo(ctx, host, "", "", "", ri.rules)
+		if err != nil {
+			return nil, err
+		}
+		if info == nil {
+			return nil, fmt.Errorf("fetchWebsiteInfo returned nil info, nil error")
+		}
+		if retryThrottled(info, throttleBudget) {
+			throttleBudget--
+			wait := info.RetryAfter
+			if wait <= 0 {
+				wait = time.Second
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(wait):
+			}
+			continue
+		}
+		batch := []crawlOut{{domain: host, info: *info}}
+		if _, err := flushBatchTx(ctx, db, batch, false, false); err != nil {
+			return nil, fmt.Errorf("persist: %w", err)
+		}
+		return info, nil
+	}
+}
+
 // sitePace waits out the per-site gap before a request to host: hostDelay, or the site's Crawl-delay if longer.
 func sitePace(host string, crawlDelay time.Duration) {
 	throttle(&hostGates, hostKey(strings.ToLower(host)), max(hostDelay, crawlDelay))

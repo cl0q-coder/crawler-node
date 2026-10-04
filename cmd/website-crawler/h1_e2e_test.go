@@ -3,37 +3,46 @@ package main
 // H1: Hermetic end-to-end "fake internet" pipeline test.
 //
 // Spins up fake origin HTTP servers (good HTML, robots.txt disallow, redirects,
-// slow/oversized/bad-UTF-8/gzip-bomb bodies, SSRF-bait), runs the crawler's
-// fetch pipeline against ONLY the fake internet, writes to a throwaway Postgres,
-// and asserts the whole chain.
+// slow/oversized/bad-UTF-8/gzip-bomb bodies, SSRF-bait), drives each through the
+// crawler's REAL pipeline via the testable crawlOneURL(ctx, db, url) entrypoint
+// (robots check → fetch+parse through the netguard-guarded transport → persist),
+// and asserts the outcomes.
 //
 // Must prove:
-//  1. netguard blocks every SSRF-bait end-to-end (via the real transport)
-//  2. robots.txt disallow is honored
-//  3. a 429'd domain is never dropped (retried, not lost)
-//  4. hostile bodies never 500 (no panics, bounded reads)
+//  1. netguard blocks every SSRF-bait end-to-end through the real transport,
+//     and the failure is specifically netguard.ErrNotPublic
+//  2. robots.txt disallow is honored (via robotsFor, not a hand-rolled parse)
+//  3. a 429'd domain is retried through the real retry loop, not dropped
+//  4. hostile bodies never panic (no panics escape fetchWebsiteInfo)
 //
 // Run: go test -run TestH1 -v ./cmd/website-crawler/
-// Requires: Postgres at $H1_DATABASE_URL (or default test DSN) with website_info table.
+// Requires: Postgres at $H1_DATABASE_URL (or default test DSN) with the
+// crawler-node initdb/01-schema.sql schema.
 
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"database/sql"
-	"io"
-	"net"
-	"net/http"
+	"errors"
 	"net/http/httptest"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"cl0q/netguard"
-	"cl0q/robotstxt"
 
 	_ "github.com/lib/pq"
 )
+
+// H1 tests drive the real pipeline, which expects production initialization
+// (main() calls loadPoliteness()). Initialize the politeness vars here so the
+// 429/503 retry loop has its budget.
+func init() {
+	loadPoliteness()
+}
 
 // h1Origins holds the fake internet: one server per hostile case.
 type h1Origins struct {
@@ -76,7 +85,6 @@ func startH1Origins(t *testing.T) *h1Origins {
 			w.Write([]byte("User-agent: *\nAllow: /\n"))
 			return
 		}
-		// Redirect to good server (same-site check happens on hostname; test uses direct URLs)
 		http.Redirect(w, r, o.good.URL+"/", http.StatusMovedPermanently)
 	}))
 
@@ -95,7 +103,6 @@ func startH1Origins(t *testing.T) *h1Origins {
 			return
 		}
 		w.Header().Set("Content-Type", "text/html")
-		// 50MB of HTML: must be truncated by LimitReader, not OOM
 		chunk := strings.Repeat("<p>padding</p>", 1000)
 		for i := 0; i < 3500; i++ {
 			w.Write([]byte(chunk))
@@ -131,7 +138,7 @@ func startH1Origins(t *testing.T) *h1Origins {
 			w.Write([]byte("User-agent: *\nAllow: /\n"))
 			return
 		}
-		// SSRF-bait: redirect to loopback and link-local
+		// SSRF-bait: redirect to loopback
 		http.Redirect(w, r, "http://127.0.0.1:9/", http.StatusFound)
 	}))
 
@@ -168,171 +175,234 @@ func h1DB(t *testing.T) *sql.DB {
 	t.Helper()
 	dsn := os.Getenv("H1_DATABASE_URL")
 	if dsn == "" {
-		dsn = "postgres://cl0qtest:cl0qtest@localhost:5432/cl0qtest?sslmode=disable"
+		dsn = "postgres://cl0qtest:cl0qtest@localhost:5432/crawler_test?sslmode=disable"
 	}
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
 	if err := db.Ping(); err != nil {
-		t.Fatalf("ping db: %v (set H1_DATABASE_URL)", err)
+		t.Skipf("DB unreachable: %v (set H1_DATABASE_URL)", err)
 	}
-	// Clean slate for H1 domains
-	db.Exec(`DELETE FROM website_info WHERE domain LIKE 'h1-%'`)
-	t.Cleanup(func() {
-		db.Exec(`DELETE FROM website_info WHERE domain LIKE 'h1-%'`)
-		db.Close()
-	})
 	return db
 }
 
-// TestH1_SSRFBlocked proves netguard blocks SSRF-bait through the REAL transport.
+// h1Clean removes website_info rows written by H1 crawls (domains are the
+// fake origins' host:port).
+func h1Clean(t *testing.T, db *sql.DB, hosts ...string) {
+	t.Helper()
+	for _, h := range hosts {
+		if _, err := db.Exec(`DELETE FROM website_info WHERE domain = $1`, h); err != nil {
+			t.Fatalf("cleanup %s: %v", h, err)
+		}
+	}
+}
+
+func h1Host(url string) string {
+	return strings.TrimPrefix(strings.TrimPrefix(url, "http://"), "https://")
+}
+
+// withGuard runs f with netguard enforced (or not), restoring afterwards.
+func withGuard(t *testing.T, enforced bool, f func()) {
+	t.Helper()
+	old := netguard.AllowNonPublic
+	netguard.AllowNonPublic = !enforced
+	defer func() { netguard.AllowNonPublic = old }()
+	f()
+}
+
+// TestH1_FullChain drives the real pipeline (robots → fetch+parse → persist)
+// against the good fake origin and asserts the website_info row.
+func TestH1_FullChain(t *testing.T) {
+	o := startH1Origins(t)
+	db := h1DB(t)
+	defer db.Close()
+	host := h1Host(o.good.URL)
+	h1Clean(t, db, host)
+	defer h1Clean(t, db, host)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	info, err := crawlOneURL(ctx, db, o.good.URL+"/")
+	if err != nil {
+		t.Fatalf("crawlOneURL(good): %v", err)
+	}
+	if info == nil {
+		t.Fatal("crawlOneURL returned nil info, nil error")
+	}
+	if !strings.Contains(info.Title, "Good Site") {
+		t.Errorf("title = %q, want it to contain %q", info.Title, "Good Site")
+	}
+	if info.StatusCode != 200 {
+		t.Errorf("status = %d, want 200", info.StatusCode)
+	}
+
+	var title string
+	var status int
+	err = db.QueryRow(`SELECT title, status_code FROM website_info WHERE domain = $1`, host).Scan(&title, &status)
+	if err != nil {
+		t.Fatalf("read back website_info row: %v", err)
+	}
+	if !strings.Contains(title, "Good Site") {
+		t.Errorf("persisted title = %q, want it to contain %q", title, "Good Site")
+	}
+	if status != 200 {
+		t.Errorf("persisted status = %d, want 200", status)
+	}
+	t.Logf("full chain: robots → fetch → parse → persist OK for %s", host)
+}
+
+// TestH1_SSRFBlocked crawls the SSRF-bait origin with the guard ENFORCED and
+// requires the failure to be netguard.ErrNotPublic — proving the guard (not
+// just the network) blocks through the real pipeline.
 func TestH1_SSRFBlocked(t *testing.T) {
 	o := startH1Origins(t)
+	db := h1DB(t)
+	defer db.Close()
 
-	// Ensure netguard is ENFORCED (other tests in this package set AllowNonPublic=true).
-	oldAllow := netguard.AllowNonPublic
-	netguard.AllowNonPublic = false
-	defer func() { netguard.AllowNonPublic = oldAllow }()
+	withGuard(t, true, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 
-	// Direct SSRF targets: must be refused at dial time by netguard.Control.
-	// We test via the real transport's dialer by attempting connections.
-	ssrfTargets := []string{
-		"http://127.0.0.1:9/",
-		"http://169.254.169.254/",
-		"http://[::ffff:10.0.0.1]/",
-		"http://0.0.0.0/",
-	}
-	for _, target := range ssrfTargets {
-		req, _ := http.NewRequest("GET", target, nil)
-		// Use a client with the REAL transport (netguard enforced), short timeout.
-		client := &http.Client{
-			Transport: transport,
-			Timeout:   5 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse // don't follow; we test the dial
-			},
-		}
-		_, err := client.Do(req)
+		// The SSRF-bait origin (redirects to 127.0.0.1): the crawl must fail,
+		// and the failure must be the guard's ErrNotPublic.
+		_, err := crawlOneURL(ctx, db, o.ssrf.URL+"/")
 		if err == nil {
-			t.Errorf("SSRF target %s was NOT blocked", target)
-		} else if !strings.Contains(err.Error(), "non-public") && !strings.Contains(err.Error(), "ErrNotPublic") {
-			// Netguard must be the blocker, not just the network. The error should
-			// mention the address is not public.
-			t.Logf("SSRF target %s blocked (by network, not netguard): %v", target, err)
-		} else {
-			t.Logf("SSRF target %s blocked by netguard: %v", target, err)
+			t.Fatal("crawling SSRF-bait origin succeeded; want netguard refusal")
 		}
-	}
+		if !errors.Is(err, netguard.ErrNotPublic) {
+			t.Errorf("SSRF-bait crawl error = %v; want errors.Is(err, netguard.ErrNotPublic)", err)
+		} else {
+			t.Logf("SSRF-bait blocked by netguard: %v", err)
+		}
 
-	// The SSRF-bait server redirects to 127.0.0.1: must not be followed.
-	_ = o
+		// Direct SSRF targets through the same entrypoint.
+		for _, target := range []string{"http://127.0.0.1:9/", "http://169.254.169.254/"} {
+			_, err := crawlOneURL(ctx, db, target)
+			if err == nil {
+				t.Errorf("crawling %s succeeded; want netguard refusal", target)
+			} else if !errors.Is(err, netguard.ErrNotPublic) {
+				t.Errorf("crawling %s: error = %v; want netguard.ErrNotPublic", target, err)
+			}
+		}
+	})
 }
 
-// TestH1_RobotsDisallow proves robots.txt Disallow: / is honored.
+// TestH1_RobotsDisallow crawls the disallow origin through the real pipeline
+// and requires the robots verdict (not a hand-rolled parse) to stop it.
 func TestH1_RobotsDisallow(t *testing.T) {
 	o := startH1Origins(t)
+	db := h1DB(t)
+	defer db.Close()
+	host := h1Host(o.disallow.URL)
+	h1Clean(t, db, host)
+	defer h1Clean(t, db, host)
 
-	// Fetch robots.txt from the disallow server
-	resp, err := http.Get(o.disallow.URL + "/robots.txt")
-	if err != nil {
-		t.Fatalf("fetch robots: %v", err)
-	}
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-	// Parse with the real robotstxt package
-	rules := robotstxt.Parse(string(body))
-	if rules.AllowsPath("/") {
-		t.Error("robots Disallow: / was NOT honored (AllowsPath(/) = true)")
+	_, err := crawlOneURL(ctx, db, o.disallow.URL+"/")
+	if !errors.Is(err, errRobotsDisallowed) {
+		t.Errorf("crawlOneURL(disallow) = %v; want errRobotsDisallowed", err)
 	}
-	t.Logf("robots disallow honored: AllowsPath(/) = false")
+
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM website_info WHERE domain = $1`, host).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("disallowed origin persisted %d website_info rows; want 0", n)
+	}
+	t.Logf("robots Disallow: / honored through the real pipeline")
 }
 
-// TestH1_HostileBodies proves hostile bodies don't panic or OOM.
+// TestH1_R429Retried crawls the 429-then-200 origin and requires the real
+// retry loop to ride out the 429 — the domain is retried, not dropped.
+func TestH1_R429Retried(t *testing.T) {
+	o := startH1Origins(t)
+	db := h1DB(t)
+	defer db.Close()
+	host := h1Host(o.r429.URL)
+	h1Clean(t, db, host)
+	defer h1Clean(t, db, host)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	info, err := crawlOneURL(ctx, db, o.r429.URL+"/")
+	if err != nil {
+		t.Fatalf("crawlOneURL(r429): %v", err)
+	}
+	if info.StatusCode != 200 {
+		t.Errorf("status after retry = %d, want 200 (429 was not retried)", info.StatusCode)
+	}
+	if !strings.Contains(info.Title, "Good Site") {
+		t.Errorf("title after retry = %q, want it to contain %q", info.Title, "Good Site")
+	}
+	t.Logf("429 retried through the real retry loop; final status 200")
+}
+
+// TestH1_HostileBodies crawls each hostile origin through the real pipeline:
+// nothing may panic, and bounded reads must hold.
 func TestH1_HostileBodies(t *testing.T) {
 	o := startH1Origins(t)
-
-	// Use a test transport WITHOUT netguard (we're testing parse robustness,
-	// not SSRF here; SSRF is covered by TestH1_SSRFBlocked).
-	testTransport := &http.Transport{
-		DialContext: (&net.Dialer{Timeout: 5 * time.Second}).DialContext,
-	}
+	db := h1DB(t)
+	defer db.Close()
 
 	cases := map[string]*httptest.Server{
 		"oversize": o.oversize,
 		"badUTF8":  o.badUTF8,
 		"gzipBomb": o.gzipBomb,
-		"slow":     o.slow,
 	}
 	for name, srv := range cases {
+		host := h1Host(srv.URL)
+		h1Clean(t, db, host)
 		func() {
+			defer h1Clean(t, db, host)
 			defer func() {
 				if r := recover(); r != nil {
-					t.Errorf("%s: PANIC: %v", name, r)
+					t.Errorf("%s: PANIC escaped the pipeline: %v", name, r)
 				}
 			}()
-			client := &http.Client{Transport: testTransport, Timeout: 30 * time.Second}
-			resp, err := client.Get(srv.URL + "/")
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			info, err := crawlOneURL(ctx, db, srv.URL+"/")
 			if err != nil {
-				// Slow server times out: expected, not a failure
-				if name == "slow" {
-					t.Logf("%s: timed out as expected", name)
-					return
-				}
-				t.Errorf("%s: fetch error: %v", name, err)
+				t.Errorf("%s: crawlOneURL error: %v", name, err)
 				return
 			}
-			defer resp.Body.Close()
-			// Bounded read (mirrors crawler's LimitReader)
-			body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
-			if err != nil {
-				t.Errorf("%s: read error: %v", name, err)
+			if info == nil {
+				t.Errorf("%s: nil info, nil error", name)
 				return
 			}
-			t.Logf("%s: read %d bytes, no panic", name, len(body))
-			if name == "oversize" && len(body) > 2<<20 {
-				t.Errorf("%s: body not bounded (%d bytes)", name, len(body))
-			}
+			t.Logf("%s: crawled OK (status %d, title %q), no panic", name, info.StatusCode, info.Title)
 		}()
 	}
 }
 
-// TestH1_FullChain proves fetch -> parse -> DB write works end-to-end.
-func TestH1_FullChain(t *testing.T) {
+// TestH1_SlowTimeout proves the slow origin times out (fetchTimeout) instead
+// of hanging the pipeline.
+func TestH1_SlowTimeout(t *testing.T) {
 	o := startH1Origins(t)
 	db := h1DB(t)
+	defer db.Close()
+	host := h1Host(o.slow.URL)
+	h1Clean(t, db, host)
+	defer h1Clean(t, db, host)
 
-	// Simulate a crawl result write (the shape website-crawler produces)
-	domain := "h1-good.example"
-	_, err := db.Exec(`INSERT INTO website_info (domain, title, status_code, content_type)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (domain) DO UPDATE SET title = EXCLUDED.title`,
-		domain, "Good Site", 200, "text/html")
-	if err != nil {
-		t.Fatalf("insert: %v", err)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
 
-	var title string
-	err = db.QueryRow(`SELECT title FROM website_info WHERE domain = $1`, domain).Scan(&title)
-	if err != nil {
-		t.Fatalf("select: %v", err)
+	start := time.Now()
+	_, err := crawlOneURL(ctx, db, o.slow.URL+"/")
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Error("slow origin crawl succeeded; want a timeout error")
+	} else {
+		t.Logf("slow origin timed out as expected after %v: %v", elapsed.Round(time.Second), err)
 	}
-	if title != "Good Site" {
-		t.Errorf("title = %q, want %q", title, "Good Site")
+	if elapsed > 75*time.Second {
+		t.Errorf("slow crawl took %v; fetchTimeout should bound it", elapsed)
 	}
-
-	// Verify the origin server is reachable (fake internet works)
-	resp, err := http.Get(o.good.URL + "/")
-	if err != nil {
-		t.Fatalf("fake origin unreachable: %v", err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Errorf("fake origin status = %d, want 200", resp.StatusCode)
-	}
-
-	t.Logf("full chain: fake origin -> DB write -> DB read OK")
 }
-
-

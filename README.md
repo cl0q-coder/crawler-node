@@ -79,6 +79,22 @@ enough. Avoid a home connection: abuse reports from site owners go to the owner 
 See [docs/CRAWLER_NODES.md](docs/CRAWLER_NODES.md) for the trust model, what is sent to cl0q, and what's
 expected of node operators.
 
+## Smoke test (fresh clone)
+
+A full node needs enrollment (node id + token, see above). Without them you can still
+verify a fresh checkout builds and the database schema applies:
+
+```bash
+cp .env.example .env
+# dummy values for the build-only check (a real run needs your enrolled id + token):
+#   CL0Q_NODE_ID=smoke-test  NODE_TOKEN=dummy  DB_PASSWORD=smoke
+docker compose config                       # validates variable interpolation, exits 0
+docker compose up -d --build db             # local Postgres only
+docker compose exec db psql -U cl0q -d cl0q -c '\dt'
+# -> tables (website_info, domain_info, ...) — initdb/01-schema.sql applied on first start
+docker compose down                         # add -v to wipe the pgdata volume
+```
+
 ## Configuration
 
 | Variable | Default | Meaning |

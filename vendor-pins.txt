@@ -1,0 +1,6 @@
+# Pinned commits for vendored packages in crawler-node.
+# Format: <package> <commit-sha> <repo-url>
+# Update via: ./sync-vendor.sh <package>
+botid 6a9dfb9af716 http://100.109.129.104:3420/chris/botid
+netguard 11d3ef5978f4 http://100.109.129.104:3420/chris/netguard
+robotstxt f835b0c4f59b http://100.109.129.104:3420/chris/robotstxt

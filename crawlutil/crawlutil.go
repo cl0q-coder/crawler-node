@@ -40,12 +40,18 @@ func Registrable(host string) string {
 		return ""
 	}
 	s := icannSuffix(h)
-	if h == s || !strings.HasSuffix(h, "."+s) {
+	if s == "" || h == s || !strings.HasSuffix(h, "."+s) {
 		return ""
 	}
 	rest := strings.TrimSuffix(h, "."+s)
 	if i := strings.LastIndexByte(rest, '.'); i >= 0 {
 		rest = rest[i+1:]
+	}
+	// Degenerate inputs (".", "..", "a..com", trailing/empty labels) must collapse
+	// to "" (non-registrable), not to a malformed "." — otherwise the function is
+	// not idempotent: Registrable(Registrable(x)) != Registrable(x).
+	if rest == "" {
+		return ""
 	}
 	return rest + "." + s
 }

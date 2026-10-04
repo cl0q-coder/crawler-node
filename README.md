@@ -1,11 +1,23 @@
 # cl0q crawler node
 
+![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
+![Go 1.25](https://img.shields.io/badge/Go-1.25-00ADD8.svg)
+
 [cl0q](https://cl0q.com) is a free, independent search engine with its own crawler and index. This repository
 is that crawler, packaged so other people can run a **node**: it discovers sites, fetches their homepages
-politely, and sends what it finds to cl0q's index. The search engine itself is not part of this repository.
+politely, and sends what it finds to cl0q's index. The search engine itself is not part of this repository
+(see [cl0q-search](../cl0q-search)).
 
 The node program is in **early access**: nodes are enrolled by hand. Email
 [cl0qsearch@gmail.com](mailto:cl0qsearch@gmail.com) if you'd like to run one.
+
+## Quick start
+
+```bash
+cp .env.example .env   # fill in CL0Q_NODE_ID, NODE_TOKEN, DB_PASSWORD (from enrollment)
+docker compose up -d --build
+docker compose logs -f website-crawler node
+```
 
 ## How it works
 
@@ -89,6 +101,11 @@ expected of node operators.
 | `INGEST_URL` | `https://cl0q.com` | Where results are sent. Must be https: the token goes with every request. |
 | `IPINFO_TOKEN` | empty | Free [ipinfo Lite](https://ipinfo.io/signup) token for ASN grouping. |
 | `CRAWL_WORKERS` | `8` | Concurrent homepage fetches. The per-server pacing always applies. |
+| `TARGET` | empty | One-off/debug: crawl a single bare domain (e.g. `example.com`) instead of the frontier. |
+| `SEED_URL` | empty | Comma-separated start URLs for `domain-crawler`; overrides `-seeds-file` and the built-in defaults. |
+| `FRONTIER_SAMPLE_PCT` | `0.5` | TABLESAMPLE % for the uncrawled-frontier draw (`website-crawler`); keeps the batch representative across ASNs. |
+| `LOOP` | empty | If set (and not `0`), `asn-enricher` runs continuously instead of once. |
+| `SPOOL_DATABASE_URL` | empty | cl0q's own deployment only — node operators leave this unset. |
 
 Everything else is optional and listed in `.env.example`. Politeness settings are floors: a value below a limit
 (including zero or a negative number) is raised to it, so they can only make a node gentler. Throughput settings
@@ -119,6 +136,13 @@ dbresil/         database-outage helpers (wait for the DB, connect timeouts)
 initdb/          the node's database schema
 seeds.txt        starting points for discovery
 ```
+
+## Related repositories
+
+- [cl0q-search](../cl0q-search) — the search backend that reads the index this node fills.
+- [robotstxt](../robotstxt) — vendored here as `robotstxt/`; the robots.txt parser both crawlers obey.
+- [botid](../botid) — vendored here as `botid/`; the User-Agent and robots.txt names (one place, not configurable).
+- [netguard](../netguard) — vendored here as `netguard/`; refuses connections to non-public addresses.
 
 ## License
 

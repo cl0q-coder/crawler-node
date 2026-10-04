@@ -8,17 +8,29 @@ permissions:
   contents: read
 
 jobs:
-  go:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+          cache: true
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
-      - run: go test -race -count=1 ./...
+      - run: go test -count=1 ./...
       - run: CGO_ENABLED=0 go build ./...
+
+  test-race:
+    runs-on: ubuntu-latest
+    env: { CGO_ENABLED: 1 } # race detector requires cgo; be explicit
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: go test -race -count=1 ./...
 
   schema:
     runs-on: ubuntu-latest
@@ -43,3 +55,22 @@ jobs:
       - name: compose file is valid
         run: CL0Q_NODE_ID=ci-node NODE_TOKEN=x DB_PASSWORD=x docker compose config --quiet
       - run: docker build -t cl0q-crawler-node:ci .
+
+  timing:
+    name: ci wall-time
+    runs-on: ubuntu-latest
+    needs: [test, test-race, schema, docker]
+    if: always()
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: report total CI wall time
+        continue-on-error: true # observability only; never fail CI over the clock
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          start_iso=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}" --jq .run_started_at)
+          start_s=$(date -u -d "$start_iso" +%s)
+          elapsed=$(( $(date -u +%s) - start_s ))
+          echo "total CI wall time: $(( elapsed / 60 ))m$(( elapsed % 60 ))s (run started $start_iso)"

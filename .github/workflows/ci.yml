@@ -34,10 +34,21 @@ jobs:
           --health-cmd "pg_isready -U cl0q -d cl0q" --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
+      - name: install postgresql-client
+        run: apt-get update && apt-get install -y --no-install-recommends postgresql-client
       - run: psql "postgres://cl0q:cl0q@localhost:5432/cl0q" -v ON_ERROR_STOP=1 -f initdb/01-schema.sql
 
   docker:
     runs-on: ubuntu-latest
+    services:
+      dind:
+        image: docker:dind
+        env:
+          DOCKER_TLS_CERTDIR: ""
+        options: >-
+          --privileged
+    env:
+      DOCKER_HOST: tcp://dind:2375
     steps:
       - uses: actions/checkout@v4
       - name: compose file is valid

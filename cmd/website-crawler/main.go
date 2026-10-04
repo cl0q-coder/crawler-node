@@ -72,6 +72,7 @@ import (
 	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/lib/pq"
 	"golang.org/x/net/html"
@@ -1719,12 +1720,23 @@ func emitDomains(stmt *sql.Stmt, fromDomain string, set map[string]bool) int {
 }
 
 // clip truncates a string to n runes for tidy log lines.
+// Bounded: walks at most n+1 runes, so a multi-MB input (keyword-stuffed
+// pages have hit 4.5MB) costs ~n bytes of work, not 4x its full length the
+// way []rune(s) did.
 func clip(s string, n int) string {
-	r := []rune(s)
-	if len(r) > n {
-		return string(r[:n]) + "…"
+	if len(s) <= n {
+		return s // ASCII fast path: n runes need at least n bytes
 	}
-	return s
+	i, runes := 0, 0
+	for i < len(s) && runes < n {
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		runes++
+	}
+	if i >= len(s) {
+		return s
+	}
+	return s[:i] + "…"
 }
 
 const (
@@ -2311,23 +2323,40 @@ func readMeta(n *html.Node, info *WebsiteInfo) {
 	}
 }
 
-// textOf concatenates descendant text (skipping script/style).
+// textOf concatenates descendant text (skipping script/style), collapsing
+// whitespace in a single pass. The old version built the full string, then
+// Fields+Join copied it twice more — 5x the title size on pathological
+// inputs (unclosed </title> absorbing the page body).
 func textOf(n *html.Node) string {
 	var b strings.Builder
+	pendingSpace := false
+	flushSpace := func() {
+		if pendingSpace && b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		pendingSpace = false
+	}
 	var f func(*html.Node)
 	f = func(n *html.Node) {
 		if n.Type == html.ElementNode && (n.Data == "script" || n.Data == "style") {
 			return
 		}
 		if n.Type == html.TextNode {
-			b.WriteString(n.Data)
+			for _, r := range n.Data {
+				if unicode.IsSpace(r) {
+					pendingSpace = true
+				} else {
+					flushSpace()
+					b.WriteRune(r)
+				}
+			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			f(c)
 		}
 	}
 	f(n)
-	return strings.Join(strings.Fields(b.String()), " ")
+	return b.String()
 }
 
 // robotsInfo is the cached-per-host robots.txt verdict (package robotstxt decides which group applies).

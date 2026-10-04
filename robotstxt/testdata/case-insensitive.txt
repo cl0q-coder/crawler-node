@@ -1,0 +1,3 @@
+USER-AGENT: *
+DISALLOW: /up
+AlLoW: /up/ok

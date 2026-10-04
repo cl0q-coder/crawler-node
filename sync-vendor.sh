@@ -18,11 +18,18 @@ sync_one() {
     # Fallback to local checkout if remote fails
     cp -r ~/workspace/gitea-repos/$pkg "$TMPDIR/$pkg"
   }
-  (cd "$TMPDIR/$pkg" && git checkout -q "$sha" 2>/dev/null || true)
+  (cd "$TMPDIR/$pkg" && git checkout -q "$sha") || {
+    echo "ERROR: cannot check out $sha for $pkg" >&2
+    exit 1
+  }
   # Copy Go files only (not .git, .github, docs)
   rm -rf "$pkg"
   mkdir -p "$pkg"
   cp "$TMPDIR/$pkg"/*.go "$pkg/" 2>/dev/null || true
+  # Copy testdata/ when present (e.g. robotstxt differential corpus)
+  if [ -d "$TMPDIR/$pkg/testdata" ]; then
+    cp -r "$TMPDIR/$pkg/testdata" "$pkg/testdata"
+  fi
   echo "  $pkg synced"
 }
 

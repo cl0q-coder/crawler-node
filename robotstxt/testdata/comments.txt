@@ -1,0 +1,5 @@
+# a comment
+User-agent: *  # inline comment
+
+Disallow: /x # trailing comment
+Sitemap: https://example.com/sitemap.xml

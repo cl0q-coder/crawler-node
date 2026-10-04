@@ -15,7 +15,8 @@ func TestPublic(t *testing.T) {
 		"127.0.0.1", "::1", "0.0.0.0", "::", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254",
 		"fe80::1", "fc00::1", "fd12:3456::1", "100.64.0.1", "100.100.100.100", "192.0.0.8", "192.0.2.1",
 		"198.18.0.1", "198.51.100.7", "203.0.113.9", "224.0.0.1", "239.255.255.250", "255.255.255.255",
-		"240.0.0.1", "ff02::1", "::ffff:127.0.0.1", "::ffff:169.254.169.254", "64:ff9b::a00:1", "2001:db8::1",
+		"240.0.0.1", "ff02::1", "::ffff:127.0.0.1", "::ffff:169.254.169.254", "::ffff:0:127.0.0.1",
+		"::ffff:0:10.0.0.1", "::ffff:0:169.254.169.254", "64:ff9b::a00:1", "2001:db8::1",
 		"2002:a00:1::1", "2001:0:4136:e378::1",
 	}
 	allowed := []string{"1.1.1.1", "8.8.8.8", "93.184.215.14", "9.9.9.9", "2606:4700:4700::1111", "::ffff:1.1.1.1"}
@@ -69,5 +70,20 @@ func TestControlWrapsBadAddress(t *testing.T) {
 	AllowNonPublic = false
 	if err := Control("tcp", "no-port-here", nil); !errors.Is(err, ErrNotPublic) {
 		t.Fatalf("an unparseable address must be refused with ErrNotPublic, got %v", err)
+	}
+}
+
+// SIIT-translated IPv6 (RFC 6145, ::ffff:0:0/96) must be reclassified as the
+// embedded IPv4 address: these spellings of loopback/private IPv4 must not be
+// treated as public even though Go's Addr.Unmap leaves them as global-unicast v6.
+func TestPublicSIITTranslated(t *testing.T) {
+	for _, s := range []string{"::ffff:0:127.0.0.1", "::ffff:0:10.0.0.1", "::ffff:0:169.254.169.254"} {
+		if PublicIP(s) {
+			t.Errorf("%s (SIIT-translated) must be refused", s)
+		}
+	}
+	// A translated spelling of a genuinely public IPv4 address stays allowed.
+	if !PublicIP("::ffff:0:1.1.1.1") {
+		t.Error("::ffff:0:1.1.1.1 (SIIT-translated public IPv4) must be allowed")
 	}
 }

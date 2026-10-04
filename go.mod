@@ -9,4 +9,7 @@ require (
 	golang.org/x/net v0.58.0
 )
 
-require golang.org/x/text v0.41.0 // indirect
+require (
+	github.com/jimsmart/grobotstxt v1.0.3 // indirect
+	golang.org/x/text v0.41.0 // indirect
+)

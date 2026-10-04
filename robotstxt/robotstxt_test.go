@@ -98,3 +98,18 @@ func TestNonGroupLinesDontSplitGroups(t *testing.T) {
 		t.Error("a Host: line inside a group must not end it")
 	}
 }
+
+// A UTF-8 BOM at the start of the file must not break parsing of the first
+// group (RFC 9309 §2.1): without stripping, the first field parses as
+// "\ufeffuser-agent" and a "Disallow: /" file wrongly allows everything.
+func TestParseStripsBOM(t *testing.T) {
+	r := Parse("\ufeffUser-agent: *\nDisallow: /\n")
+	if r.Allows(mustURL("https://x.com/anything")) {
+		t.Error("BOM-prefixed robots.txt with Disallow: / must not allow paths")
+	}
+	// A file without a BOM behaves identically.
+	r2 := Parse("User-agent: *\nDisallow: /\n")
+	if r2.Allows(mustURL("https://x.com/anything")) {
+		t.Error("plain robots.txt with Disallow: / must not allow paths")
+	}
+}

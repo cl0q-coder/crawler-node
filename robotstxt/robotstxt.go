@@ -36,6 +36,11 @@ type rule struct {
 
 // Parse reads a robots.txt body.
 func Parse(body string) *Rules {
+	// RFC 9309 §2.1: strip a single leading UTF-8 BOM. Without this, a
+	// BOM-prefixed first line parses as field "\ufeffuser-agent", the group
+	// is never created, and AllowsPath wrongly returns true for a file that
+	// disallows everything.
+	body = strings.TrimPrefix(body, "\ufeff")
 	type group struct {
 		ours, star bool
 		rules      []rule
@@ -100,7 +105,7 @@ func Parse(body string) *Rules {
 func pattern(p string) *regexp.Regexp {
 	end := strings.HasSuffix(p, "$")
 	p = strings.TrimSuffix(p, "$")
-	q := strings.ReplaceAll(regexp.QuoteMeta(p), `\*`, `.*`)
+	q := strings.ReplaceAll(regexp.QuoteMeta(escapePattern(p)), `\*`, `.*`)
 	if end {
 		q += "$"
 	}
@@ -109,6 +114,47 @@ func pattern(p string) *regexp.Regexp {
 		return regexp.MustCompile(`^\x00never`)
 	}
 	return re
+}
+
+// escapePattern canonicalizes a robots path pattern the way Google's reference
+// parser does (RFC 9309: matching happens against the percent-encoded path,
+// and Allows() feeds patterns u.EscapedPath()): UTF-8 multibyte sequences are
+// percent-encoded, and existing %-escapes are normalized to uppercase hex.
+// Without this, a rule like "Disallow: /café" could never match, because the
+// path under test arrives as "/caf%C3%A9".
+func escapePattern(p string) string {
+	var b strings.Builder
+	b.Grow(len(p))
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if c == '%' && i+2 < len(p) && isHex(p[i+1]) && isHex(p[i+2]) {
+			b.WriteByte('%')
+			b.WriteByte(upperHex(p[i+1]))
+			b.WriteByte(upperHex(p[i+2]))
+			i += 2
+			continue
+		}
+		if c >= 0x80 {
+			const hexd = "0123456789ABCDEF"
+			b.WriteByte('%')
+			b.WriteByte(hexd[c>>4])
+			b.WriteByte(hexd[c&0xf])
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+func upperHex(c byte) byte {
+	if 'a' <= c && c <= 'f' {
+		return c - ('a' - 'A')
+	}
+	return c
 }
 
 // Allows reports whether u's path (and query) may be fetched.

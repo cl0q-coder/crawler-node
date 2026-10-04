@@ -91,11 +91,35 @@ type Health struct {
 	once sync.Once
 }
 
+// safeGo runs fn in a background goroutine that cannot crash the process: a
+// panic (e.g. a malformed lib/pq frame from the health pinger) is logged and,
+// after a short backoff, fn is restarted — mirroring the goSafe wrapper used
+// by every other background goroutine in the services.
+func safeGo(name string, fn func()) {
+	go func() {
+		for {
+			ok := func() (returned bool) {
+				defer func() {
+					if rec := recover(); rec != nil {
+						log.Printf("[dbresil] goroutine %q panicked: %v", name, rec)
+					}
+				}()
+				fn()
+				return true
+			}()
+			if ok {
+				return
+			}
+			time.Sleep(2 * time.Second) // backoff before restarting a panicked task
+		}
+	}()
+}
+
 // NewHealth starts a background pinger that refreshes the up/down flag every `every` until Stop is called.
 func NewHealth(db *sql.DB, every time.Duration) *Health {
 	h := &Health{stop: make(chan struct{})}
 	h.up.Store(Reachable(db))
-	go func() {
+	safeGo("dbresil-health", func() {
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
@@ -106,7 +130,7 @@ func NewHealth(db *sql.DB, every time.Duration) *Health {
 				return
 			}
 		}
-	}()
+	})
 	return h
 }
 

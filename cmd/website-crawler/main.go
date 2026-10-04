@@ -130,12 +130,27 @@ func throttle(gates *sync.Map, key string, delay time.Duration) {
 		return
 	}
 	for {
-		gi, _ := gates.LoadOrStore(key, &hostGate{})
+		// Fast path: the key almost always exists already. A plain Load avoids
+		// the &hostGate{} allocation that LoadOrStore performs on every call,
+		// even when the key is present and the fresh value is discarded.
+		gi, ok := gates.Load(key)
+		if !ok {
+			gi, _ = gates.LoadOrStore(key, &hostGate{})
+		}
 		g := gi.(*hostGate)
 		g.mu.Lock()
-		if g.dead { // pruned after we loaded it: its idle time already exceeded any wait, use the fresh gate
+		if g.dead {
+			// The gate was marked dead but is still in the map (prune's delete
+			// raced us or hasn't run yet). Swap in a fresh gate instead of
+			// spinning on the dead one forever. Zero last = no wait: a new
+			// gate has no prior request to pace against.
 			g.mu.Unlock()
-			continue
+			fresh := &hostGate{}
+			if !gates.CompareAndSwap(key, g, fresh) {
+				continue // someone else replaced it; reload
+			}
+			g = fresh
+			g.mu.Lock()
 		}
 		if wait := delay - time.Since(g.last); wait > 0 {
 			time.Sleep(wait)
@@ -1045,8 +1060,14 @@ func capBatch(ts []target, maxPerGroup, maxReturn int) []target {
 	if maxReturn < 1 {
 		maxReturn = len(ts)
 	}
-	counts := make(map[string]int, len(ts))
-	seenDom := make(map[string]bool, len(ts))
+	// Size the maps for the admitted set (at most maxReturn), not the pool: a
+	// pool much larger than maxReturn would over-allocate both maps here.
+	hint := maxReturn
+	if hint > len(ts) {
+		hint = len(ts)
+	}
+	counts := make(map[string]int, hint)
+	seenDom := make(map[string]bool, hint)
 	out := make([]target, 0, maxReturn)
 	var blocked, capped int
 	for _, t := range ts {
@@ -2209,50 +2230,62 @@ func parseHTMLInfo(root *html.Node, info *WebsiteInfo, domain string) {
 			case "link":
 				var rel, href string
 				for _, a := range n.Attr {
-					switch strings.ToLower(a.Key) {
-					case "rel":
-						rel = strings.ToLower(a.Val)
-					case "href":
+					switch {
+					case strings.EqualFold(a.Key, "rel"):
+						rel = a.Val
+					case strings.EqualFold(a.Key, "href"):
 						href = a.Val
 					}
+					if rel != "" && href != "" {
+						break // a valid link tag carries one rel and one href
+					}
 				}
-				if rel == "canonical" && info.Canonical == "" {
+				if strings.EqualFold(rel, "canonical") && info.Canonical == "" {
 					info.Canonical = dropIfLong(href, maxURLLen)
 				}
 			case "a":
 				for _, a := range n.Attr {
-					if strings.ToLower(a.Key) != "href" {
+					if !strings.EqualFold(a.Key, "href") {
 						continue
 					}
-					u, e := url.Parse(strings.TrimSpace(a.Val))
-					if e != nil || u.Host == "" {
-						continue
-					}
-					host := strings.ToLower(strings.TrimPrefix(u.Hostname(), "www."))
-					if host == base {
-						continue
-					}
-					info.OutboundLinkCount++
-					// Collect valid registrable domains for the discovery emit (skip IPs, bare public suffixes,
-					// schemeless junk like mailto:/tel:, and over-long hosts).
-					if (u.Scheme == "" || u.Scheme == "http" || u.Scheme == "https") &&
-						len(host) <= 253 && crawlutil.Registrable(host) != "" {
-						// Apex-only: FOLD a subdomain to its registrable site (blog.acme.com → acme.com,
-						// news.nation.co.ke → nation.co.ke) instead of dropping it — captures the parent apex
-						// (breadth) without the fan-out: one apex per family, deduped by the outDomains set.
-						emit := host
-						if !crawlSubdomains.Load() {
-							emit = crawlutil.Registrable(host)
+					// Only the first href attribute is used (duplicates are invalid HTML).
+					href := strings.TrimSpace(a.Val)
+					// Skip the expensive url.Parse for relative links ("/path", "#frag")
+					// and non-hierarchical schemes ("mailto:", "tel:"): hasHost gates
+					// exactly the hrefs that would parse to an empty Host below.
+					if hasHost(href) {
+						if u, e := url.Parse(href); e == nil && u.Host != "" {
+							// Same-site check before allocating the lowercased host: it
+							// is only needed on the outbound path (map key + checks).
+							w := strings.TrimPrefix(u.Hostname(), "www.")
+							if !strings.EqualFold(w, base) {
+								host := strings.ToLower(w)
+								info.OutboundLinkCount++
+								// Collect valid registrable domains for the discovery emit (skip IPs, bare public suffixes,
+								// schemeless junk like mailto:/tel:, and over-long hosts).
+								if (u.Scheme == "" || u.Scheme == "http" || u.Scheme == "https") &&
+									len(host) <= 253 && crawlutil.Registrable(host) != "" {
+									// Apex-only: FOLD a subdomain to its registrable site (blog.acme.com → acme.com,
+									// news.nation.co.ke → nation.co.ke) instead of dropping it — captures the parent apex
+									// (breadth) without the fan-out: one apex per family, deduped by the outDomains set.
+									emit := host
+									if !crawlSubdomains.Load() {
+										emit = crawlutil.Registrable(host)
+									}
+									info.outDomains[emit] = true
+								}
+							}
 						}
-						info.outDomains[emit] = true
 					}
+					break
 				}
 			case "img":
 				info.ImageCount++
 			case "html":
 				for _, a := range n.Attr {
-					if strings.ToLower(a.Key) == "lang" && info.PageLanguage == "" {
+					if strings.EqualFold(a.Key, "lang") && info.PageLanguage == "" {
 						info.PageLanguage = clip(a.Val, maxTagLen)
+						break
 					}
 				}
 			}
@@ -2265,6 +2298,14 @@ func parseHTMLInfo(root *html.Node, info *WebsiteInfo, domain string) {
 	}
 	walk(root)
 	info.WordCount = words // body text itself is never stored — only this count
+}
+
+// hasHost reports whether href can carry a URL host: it is hierarchical ("://")
+// or protocol-relative ("//"). Relative links ("/path", "#frag") and
+// non-hierarchical schemes ("mailto:", "tel:", "javascript:", "data:") never do —
+// url.Parse returns them with an empty Host — so callers can skip the parse.
+func hasHost(href string) bool {
+	return strings.Contains(href, "://") || strings.HasPrefix(href, "//")
 }
 
 // countWords counts whitespace-separated words like len(strings.Fields(s)), without allocating the slice. Text nodes
@@ -2284,14 +2325,14 @@ func countWords(s string) int {
 func readMeta(n *html.Node, info *WebsiteInfo) {
 	var name, prop, content, charset string
 	for _, a := range n.Attr {
-		switch strings.ToLower(a.Key) {
-		case "name":
+		switch {
+		case strings.EqualFold(a.Key, "name"):
 			name = strings.ToLower(a.Val)
-		case "property":
+		case strings.EqualFold(a.Key, "property"):
 			prop = strings.ToLower(a.Val)
-		case "content":
+		case strings.EqualFold(a.Key, "content"):
 			content = a.Val
-		case "charset":
+		case strings.EqualFold(a.Key, "charset"):
 			charset = a.Val
 		}
 	}

@@ -100,10 +100,47 @@ jobs:
         run: CL0Q_NODE_ID=ci-node NODE_TOKEN=x DB_PASSWORD=x docker compose config --quiet
       - run: docker build -t cl0q-crawler-node:ci .
 
+  # H5: Supply-chain hardening. The boring work that stops a SolarWinds.
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # 1. govulncheck: fail on known vulnerabilities in dependencies
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+      # 2. Verify dependencies are pinned and intact (no tampering)
+      - name: verify modules
+        run: |
+          go mod verify
+          test -f go.sum || { echo "go.sum missing"; exit 1; }
+      # 3. go.mod/go.sum must be tidy: fail on ANY diff after tidy
+      - name: tidy check
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+      # 4. Real CycloneDX SBOM (not go list -m -json)
+      - name: CycloneDX SBOM
+        run: |
+          go install github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.12.0
+          cyclonedx-gomod mod -json -output sbom.cdx.json .
+          test -s sbom.cdx.json
+          echo "SBOM components: $(jq -r '.components | length' sbom.cdx.json)"
+      - name: upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-cdx
+          path: sbom.cdx.json
+
   timing:
     name: ci wall-time
     runs-on: ubuntu-latest
-    needs: [test, test-race, schema, docker]
+    needs: [test, test-race, schema, docker, supply-chain]
     if: always()
     permissions:
       contents: read

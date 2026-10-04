@@ -60,15 +60,15 @@ var n2Refused = []struct {
 	{"::1/128", []string{"::1"}},
 	{"::/128", []string{"::"}},
 	{"64:ff9b:1::/48", []string{"64:ff9b:1::1"}},
-	{"100::/64", []string{"100::1", "100::ffff"}},       // discard-only
-	{"100:0:0:1::/64", []string{"100:0:0:1::1"}},         // dummy prefix, RFC 9780
-	{"2001::/32", []string{"2001::1"}},                   // Teredo
-	{"2001:2::/48", []string{"2001:2::1"}},               // benchmarking
-	{"2001:db8::/32", []string{"2001:db8::1"}},           // documentation
-	{"3fff::/20", []string{"3fff::1", "3fff:fff::1"}},     // documentation
-	{"5f00::/16", []string{"5f00::1", "5f00:ffff::1"}},    // SRv6 SIDs
-	{"fc00::/7", []string{"fc00::1", "fd12:3456::1"}},     // unique local
-	{"fe80::/10", []string{"fe80::1", "febf:ffff::1"}},   // link-local
+	{"100::/64", []string{"100::1", "100::ffff"}},      // discard-only
+	{"100:0:0:1::/64", []string{"100:0:0:1::1"}},       // dummy prefix, RFC 9780
+	{"2001::/32", []string{"2001::1"}},                 // Teredo
+	{"2001:2::/48", []string{"2001:2::1"}},             // benchmarking
+	{"2001:db8::/32", []string{"2001:db8::1"}},         // documentation
+	{"3fff::/20", []string{"3fff::1", "3fff:fff::1"}},  // documentation
+	{"5f00::/16", []string{"5f00::1", "5f00:ffff::1"}}, // SRv6 SIDs
+	{"fc00::/7", []string{"fc00::1", "fd12:3456::1"}},  // unique local
+	{"fe80::/10", []string{"fe80::1", "febf:ffff::1"}}, // link-local
 }
 
 // n2Allowed: addresses that MUST stay allowed — real public IPs plus every
@@ -79,14 +79,14 @@ var n2Refused = []struct {
 var n2Allowed = []string{
 	"1.1.1.1", "8.8.8.8", "9.9.9.9", "93.184.215.14",
 	"2606:4700:4700::1111", "2001:4860:4860::8888",
-	"192.31.196.1",  // AS112-v4, IANA Globally Reachable True
-	"192.52.193.1",  // AMT, IANA Globally Reachable True
-	"192.175.48.1",  // Direct Delegation AS112, IANA Globally Reachable True
-	"2001:1::1",     // PCP anycast, IANA Globally Reachable True
-	"2001:1::2",     // TURN anycast, IANA Globally Reachable True
-	"2001:3::1",     // AMT, IANA Globally Reachable True
-	"2001:4:112::1", // AS112-v6, IANA Globally Reachable True
-	"2620:4f:8000::1", // Direct Delegation AS112 Service, IANA Globally Reachable True
+	"192.31.196.1",     // AS112-v4, IANA Globally Reachable True
+	"192.52.193.1",     // AMT, IANA Globally Reachable True
+	"192.175.48.1",     // Direct Delegation AS112, IANA Globally Reachable True
+	"2001:1::1",        // PCP anycast, IANA Globally Reachable True
+	"2001:1::2",        // TURN anycast, IANA Globally Reachable True
+	"2001:3::1",        // AMT, IANA Globally Reachable True
+	"2001:4:112::1",    // AS112-v6, IANA Globally Reachable True
+	"2620:4f:8000::1",  // Direct Delegation AS112 Service, IANA Globally Reachable True
 	"::ffff:0:1.1.1.1", // SIIT spelling of a public IPv4 address
 }
 

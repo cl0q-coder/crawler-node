@@ -190,6 +190,14 @@ func hostThrottle(domain string) { throttle(&hostGates, hostKey(domain), hostDel
 // (which is what earns "too many requests / bad bot" reports even when each host is hit once).
 func ipThrottle(ip string) { throttle(&ipGates, ip, ipDelay) }
 
+// T1: sitemap discovery state. sitemapChecked records the last time we fetched
+// sitemaps for a domain; rechecks are throttled to sitemapRecheckInterval so a
+// sitemap isn't refetched on every batch cycle (robotsCache is cleared per batch,
+// but sitemaps are bigger and change slower than robots.txt).
+var sitemapChecked sync.Map // domain -> unix seconds of last sitemap check
+
+const sitemapRecheckInterval = 24 * time.Hour
+
 // userAgent comes from botid: the good-bot form "Mozilla/5.0 (compatible; cl0q-node/1.0; operator=<id>; +<url>)".
 // It never forges a real browser build — that trips WAF "client inconsistency" rules and reads as a deceptive bot.
 var fpChecker *footprint.Checker // NR3: nil until main() opens the DB
@@ -756,6 +764,7 @@ func main() {
 	mCrawledDeferred = mreg.Counter("crawler_pages_deferred_total", "pages deferred by ASN/IP backoff")
 	mCrawledBlocked = mreg.Counter("crawler_pages_blocked_total", "pages blocked by blacklist")
 	mBreakerOpen = mreg.Counter("crawler_breaker_opens_total", "times the ASN/IP breaker opened a cooldown")
+	mSitemapURLs = mreg.Counter("crawler_sitemap_urls_total", "T1: domains discovered via sitemaps")
 	mreg.GaugeFunc("crawler_frontier_depth", "uncrawled domains in domain_info", func() int64 {
 		var n int64
 		_ = db.QueryRow(`SELECT count(*) FROM domain_info WHERE web_crawled_at IS NULL`).Scan(&n)
@@ -2055,6 +2064,9 @@ func crawlOne(t target) result {
 		} else {
 			breaker.success(key)
 		}
+		// T1: sitemap-driven discovery. Sitemaps list URLs the homepage crawl
+		// would never find; discovered domains join the normal emit path.
+		sitemapDiscover(domain, t.ip, ri, info)
 		return result{domain: domain, info: info}
 	}
 }
@@ -2693,6 +2705,7 @@ type robotsInfo struct {
 	allowed  bool             // the homepage "/" may be fetched
 	delay    time.Duration    // Crawl-delay, capped at robotstxt.MaxCrawlDelay
 	rules    *robotstxt.Rules // path rules, checked again for every redirect hop
+	sitemaps []string         // T1: Sitemap: directive URLs from robots.txt (may be empty)
 	blockErr error            // the server dropped/reset/timed out the robots request → it's refusing us (not cached)
 }
 
@@ -2751,7 +2764,9 @@ func fetchRobots(domain, ip string) robotsInfo {
 		if resp.StatusCode >= 400 {
 			return robotsInfo{allowed: true} // no robots / not found -> allowed
 		}
-		return parseRobots(string(body))
+		ri := parseRobots(string(body))
+		ri.sitemaps = sitemapURLsFromRobots(string(body)) // T1: Sitemap: directives for discovery
+		return ri
 	}
 	return robotsInfo{allowed: true} // robots unreachable -> be permissive
 }

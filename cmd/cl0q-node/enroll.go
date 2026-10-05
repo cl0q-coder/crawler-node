@@ -131,6 +131,16 @@ func runEnrollCommand(args []string) {
 	}
 }
 
+// enrollClient is the HTTP client for the enrol handshake. It NEVER follows
+// redirects: the request body carries the refresh_secret on re-enrol, and
+// following a 3xx would leak it to the redirect target. A 3xx response is
+// returned as-is so the caller sees the refusal.
+var enrollClient = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 // doEnroll performs the enrol handshake and stores the credentials.
 // The token and refresh_secret are never printed or logged. Returns nil
 // on success.
@@ -162,12 +172,18 @@ func doEnroll(ingestURL, contact, out string) error {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "cl0q-node-enroll/1.0")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := enrollClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("POST %s/api/nodes/enroll: %w", ingestURL, err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	if resp.StatusCode >= 300 {
+		// 3xx: the server tried to redirect us; enrollClient refuses to follow
+		// (the request carried the refresh_secret). Treat as a hard failure —
+		// never silently send credentials elsewhere.
+		return fmt.Errorf("server returned HTTP %d (redirects are not followed): %s", resp.StatusCode, bytes.TrimSpace(body))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("server returned HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(body))
 	}

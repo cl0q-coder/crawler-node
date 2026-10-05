@@ -17,8 +17,8 @@ enroll in one command, verify with preflight, run with Docker Compose.
   node_id is refused. New nodes start quarantined.
 - **Trust states & quarantine**: quarantined nodes' submissions land in a
   staging area and never reach the live index until graduation (1,000
-  spot-verified samples at 98%+ hash match and 3 clean days, or 7 clean
-  days flat). Quota while quarantined: 25k submissions/day; on 429 the
+  content-hash-verified samples and 3 clean days, or at least one verified
+  sample and 7 clean days flat). Quota while quarantined: 25k submissions/day; on 429 the
   node backs off and spools locally — submissions are never dropped.
 - **Preflight self-check** (`cmd/preflight`): six PASS/FAIL checks —
   local DB, ingest reachability + token validity, DNS, HTTPS egress,

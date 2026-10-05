@@ -35,18 +35,27 @@ Response `200 OK` (JSON):
 {
   "node_id": "nd_7f3a9c",
   "token": "<secret, shown once>",
+  "refresh_secret": "<secret, shown once>",
   "ingest_url": "https://cl0q.com",
   "quarantined": true
 }
 ```
 
-- The node stores the token with mode `0600` in its config dir and **never
-  logs it** (not even at debug level).
+- The node stores `node_id`, `token`, and `refresh_secret` in its config file
+  with mode `0600` and **never logs them** (not even at debug level). Both
+  secrets appear once, in this response only — never printed to the terminal.
 - Every new node starts `quarantined: true` (see §3).
-- **Re-enrol / rotation** is idempotent: `POST /api/nodes/enroll` with
-  `{"node_id": "nd_7f3a9c"}` returns a fresh token for the same node id.
-  The old token stops working; in-flight batches are retried with the new
-  one, nothing is lost.
+- **Rotation** (authenticated — not an idempotent re-enrol): to mint a fresh
+  token, `POST /api/nodes/enroll` with
+  `{"node_id": "nd_7f3a9c", "refresh_secret": "<stored secret>"}`. The server
+  compares the refresh_secret (constant-time) and returns a new token; the old
+  token stops working, in-flight batches retry with the new one, nothing is
+  lost. A request carrying **only** the `node_id` is refused: the node_id is
+  public — it appears in the crawl User-Agent — so it can never, by itself,
+  rotate credentials. The `refresh_secret` is never sent on ingest calls and
+  itself never rotates; keep it as secret as the token. A node running on a
+  bare `NODE_TOKEN` env var has no stored refresh_secret and so cannot rotate —
+  enrol into a credentials file instead.
 
 ## 2. Authentication
 
@@ -58,10 +67,12 @@ Authorization: Bearer <token>
 
 - The HTTP client **never follows redirects** — a redirect response is
   surfaced as an error, so the token only ever goes to `ingest_url`.
-- The server checks the token (it stores only the SHA-256 hash) and the
-  source IP the node enrolled with. Note: nodes behind rotating egress IPs
-  will trip the IP check — re-enrol, or contact cl0q; the quarantine in §3
-  is the primary trust mechanism, the IP check is a secondary signal.
+- The server checks the token (it stores only the SHA-256 hash). Open-enrolled
+  nodes are **token-only**: they authenticate from any source IP, so a dynamic
+  or rotating egress IP is fine — it does not trip anything. (cl0q can
+  optionally pin a specific node to a source-IP CIDR; such a node receives
+  `403` from an off-allowlist address. This is not the default and is never set
+  by open enrol.) Quarantine (§3) is the trust mechanism, not the source IP.
 
 ## 3. Trust states
 
@@ -71,14 +82,24 @@ Authorization: Bearer <token>
 | `trusted` | Graduated. Submissions flow to the live index normally. |
 | `revoked` | Token rejected. The node wipes its token and re-enrols on the next run. |
 
-**Graduation** (server-side, both conditions or the flat rule):
+**Graduation** (server-side; the count rule or the flat rule):
 
-- 1,000 spot-verified samples at 98%+ hash match **and** 3 clean days, **or**
-- 7 clean days flat.
+- **1,000** spot-verified samples — fetches whose `content_sha256` the server
+  re-fetched and matched — **and** 3 clean days, **or**
+- at least one verified sample **and** 7 clean days flat.
 
-**Quotas**: 10k submissions/day per node while quarantined (above a real
-node's early pace, low enough to bound junk). **Strike rule**: 3 failed
-verifications in a rolling 24h window re-quarantines the node.
+There is no percentage gate: a sampled submission either matches (and counts
+toward the 1,000) or is dropped, and a drop never advances graduation. A node
+that submits junk therefore simply never graduates — fail-closed. A "clean day"
+is counted from the node's last strike (or from enrolment if it has none).
+
+**Quotas**: 25,000 submissions/day per node while quarantined (above a real
+node's early pace, low enough to bound junk); over quota the server answers
+`429` and the node spools (§5) — nothing is dropped. **Strike rule**: a
+spot-verification that finds the node contacted a non-public / SSRF address is
+a *strike*; 3 strikes in a rolling 24h window reset the clean-day clock (the
+node stays quarantined and rebuilds its clean days). A content-hash mismatch is
+dropped but is **not** a strike.
 
 ## 4. Submission envelope
 
@@ -123,15 +144,16 @@ same as today.
 
 | Server response | Node behavior |
 |---|---|
-| `401` | Token invalid/expired: re-enrol automatically (idempotent), exponential backoff. Spool submissions to the local SQLite WAL meanwhile — **nothing is lost, nothing blocks silently**. |
+| `401` | Token invalid/expired: **rotate automatically** (node_id + refresh_secret, §1) when the node enrolled via `cl0q-node enroll`; a node on a bare `NODE_TOKEN` env var has no refresh_secret, so it stops and alerts rather than silently failing. Spool submissions to the local SQLite WAL meanwhile — **nothing is lost, nothing blocks silently**. |
 | `403` + `{"revoked": true}` | Wipe the token, re-enrol on the next run. Never keep submitting. |
 | `429` | Back off per `Retry-After`; quota exceeded → spool, don't drop. |
 | `5xx` | Retry with backoff; after N attempts the batch goes to the local dead-letter table (existing `cl0q_node_deadletter`) and the node carries on. |
 
 ## 6. Versioning
 
-- The `version` string in the enrol request lets the server reject ancient
-  nodes with `426 Upgrade Required` instead of silently mis-parsing them.
+- The `version` string in the enrol request is recorded and reserved so a
+  future server can reject incompatible nodes (e.g. `426 Upgrade Required`)
+  instead of silently mis-parsing them. v1 servers accept any version.
 - Envelope fields are **additive only**: the server ignores unknown fields,
   the node tolerates missing new fields from older peers. No breaking
   changes without a protocol version bump (this document's `v1`).

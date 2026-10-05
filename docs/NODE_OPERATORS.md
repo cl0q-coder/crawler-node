@@ -39,9 +39,11 @@ enter the live index. Spot-verification means: cl0q re-fetches the URL
 itself, compares the page's content hash with yours, and confirms you
 honored robots.txt and the address guard. Your submissions are kept in a
 staging area meanwhile — **nothing you submit is lost while quarantined**.
-A well-behaved node graduates automatically: either 1,000
-spot-verified submissions at 98%+ hash match with 3 clean days, or 7
-clean days flat.
+A well-behaved node graduates automatically: either 1,000 spot-verified
+submissions (fetches cl0q re-fetched and whose content hash matched yours)
+with 3 clean days, or at least one verified submission with 7 clean days
+flat. There's no percentage to hit — a sampled page either matches or is
+dropped, and only matches count toward the 1,000.
 
 Three trust states exist: `quarantined` (new / under verification),
 `trusted` (graduated — submissions flow to the live index normally), and
@@ -51,8 +53,11 @@ next run).
 While quarantined you may send up to 25,000 submissions per day. If you
 hit that quota the server answers 429 — your node backs off and spools
 the batch to its local database. It retries later. **Submissions are
-never dropped.** If 3 of your spot-verifications fail in a 24-hour
-window, you're re-quarantined (trust goes back to zero).
+never dropped.** If cl0q catches your node fetching a non-public or
+blocked (SSRF) address 3 times in a 24-hour window, your clean-day count
+resets to zero — you stay quarantined and start rebuilding. (An unmodified
+node never does this; it's a guard against a tampered one. A page whose
+hash simply doesn't match is dropped, not counted against you.)
 
 ### Rotation
 
@@ -84,7 +89,9 @@ docker compose run --rm preflight
 Six checks, each a clear PASS/FAIL: local database, ingest reachability +
 token validity, DNS, outbound HTTPS, the SSRF guard (it must refuse
 private addresses), and robots.txt fetching. All six must pass. If the
-ingest check fails, your token or IP isn't accepted — re-run `enroll`.
+ingest check fails, your token isn't accepted — re-run `enroll` to rotate
+it. (Your node authenticates by token alone; a changed or dynamic public
+IP is fine.)
 
 ## 4. Go live
 
@@ -125,7 +132,7 @@ cl0q (cl0qsearch@gmail.com) so your node id is retired.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `preflight` ingest FAIL | Token rejected or IP changed | `docker compose run --rm cl0q-node enroll` (rotates the token) |
+| `preflight` ingest FAIL | Token rejected (expired/revoked) | `docker compose run --rm cl0q-node enroll` (rotates the token) |
 | `CL0Q_NODE_ID is not set` | Enrol didn't run | Run step 1; check `cl0q-node.json` exists |
 | `invalid WORKERS=...` etc. | Bad setting in `.env` | The message names the knob and the allowed range — fix the value |
 | Node runs but sends nothing | DB or ingest unreachable | `docker compose logs node`, then `preflight` |
@@ -165,7 +172,7 @@ The crawler never touches private, loopback, link-local, or cloud
 metadata addresses.
 
 **Your obligations:** run the code as published (don't weaken the
-politeness rules or change the User-Agent), crawl from the IP you
-enrolled with on a network that allows it, read abuse reports your
-provider forwards, and keep your token private — if it leaks, re-enroll
-to rotate it.
+politeness rules or change the User-Agent), crawl from a public IP on a
+network that allows it, read abuse reports your provider forwards, and
+keep your token and refresh secret private — if the token leaks, rotate
+it (re-run `enroll`).

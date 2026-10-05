@@ -56,11 +56,10 @@ func Normalize(rawURL string) (string, error) {
 
 	// Strip default ports.
 	if port := u.Port(); port != "" {
-		if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
-			host = host // port dropped below
-		} else {
+		if !((u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443")) {
 			host = host + ":" + port
 		}
+		// Default ports are dropped (host stays without port).
 	}
 	u.Host = host
 

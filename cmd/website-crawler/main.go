@@ -86,6 +86,7 @@ import (
 	"cl0q/internal/config"
 	"cl0q/internal/footprint"
 	"cl0q/internal/metrics"
+	"cl0q/internal/simhash"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -196,7 +197,7 @@ var fpChecker *footprint.Checker // NR3: nil until main() opens the DB
 
 // NR6: observability. Initialized in main(); nil in tests that don't call it.
 var mreg *metrics.Registry
-var mCrawledOK, mCrawledFailed, mCrawledSkipped, mCrawledChallenged, mCrawledUnchanged, mCrawledDeferred, mCrawledBlocked *atomic.Int64
+var mCrawledOK, mCrawledFailed, mCrawledSkipped, mCrawledChallenged, mCrawledUnchanged, mCrawledDeferred, mCrawledBlocked, mCrawledDuplicates *atomic.Int64
 var mBreakerOpen *atomic.Int64
 
 var (
@@ -358,6 +359,8 @@ type WebsiteInfo struct {
 	Charset, Robots, OGTitle, OGImage, TwitterCard string
 	PageLanguage, ServerHeader                     string
 	ETag, LastModified                             string          // HTTP validators captured on a 200; stored so the next recrawl can send a conditional GET
+	SimHash                                        uint64          // IG2: SimHash fingerprint for near-duplicate detection (0 = not computed)
+	DuplicateOf                                    string          // IG2: domain of the near-duplicate original ("" if unique)
 	outDomains                                     map[string]bool // external domains seen on the page (for discovery emit; not persisted as a column)
 	Challenge                                      string          // anti-bot vendor if this was an interstitial, not the real page (not a column → routed to fetch_error)
 	NotModified                                    bool            // server answered 304 to our conditional GET → content unchanged (not a column → routed to a crawled_at-only touch)
@@ -753,6 +756,7 @@ func main() {
 	mCrawledSkipped = mreg.Counter("crawler_pages_skipped_total", "pages skipped (robots, blacklist note)")
 	mCrawledChallenged = mreg.Counter("crawler_pages_challenged_total", "pages behind a bot challenge")
 	mCrawledUnchanged = mreg.Counter("crawler_pages_unchanged_total", "pages unchanged (304)")
+	mCrawledDuplicates = mreg.Counter("crawler_pages_duplicates_total", "IG2: pages detected as near-duplicates (SimHash)")
 	mCrawledDeferred = mreg.Counter("crawler_pages_deferred_total", "pages deferred by ASN/IP backoff")
 	mCrawledBlocked = mreg.Counter("crawler_pages_blocked_total", "pages blocked by blacklist")
 	mBreakerOpen = mreg.Counter("crawler_breaker_opens_total", "times the ASN/IP breaker opened a cooldown")
@@ -808,6 +812,18 @@ func main() {
 	// docker initdb) must have the column too — otherwise prepare fails at
 	// startup.
 	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS source_node TEXT`)
+	// IG2: SimHash fingerprint for near-duplicate detection. The 64-bit hash
+	// is split into 4x16-bit blocks for indexed lookup (near-dupes share a block).
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS simhash BIGINT`)
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS simhash_b0 SMALLINT`)
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS simhash_b1 SMALLINT`)
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS simhash_b2 SMALLINT`)
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS simhash_b3 SMALLINT`)
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS duplicate_of TEXT`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_website_info_simhash_b0 ON website_info (simhash_b0)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_website_info_simhash_b1 ON website_info (simhash_b1)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_website_info_simhash_b2 ON website_info (simhash_b2)`)
+	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_website_info_simhash_b3 ON website_info (simhash_b3)`)
 
 	// Upsert refreshes data + crawled_at on re-crawl.
 	upsert, err := db.Prepare(`
@@ -827,6 +843,8 @@ func main() {
 			og_title=EXCLUDED.og_title, og_image=EXCLUDED.og_image, twitter_card=EXCLUDED.twitter_card,
 			page_language=EXCLUDED.page_language, server_header=EXCLUDED.server_header,
 			fetch_error=EXCLUDED.fetch_error, etag=EXCLUDED.etag, last_modified=EXCLUDED.last_modified,
+	simhash=EXCLUDED.simhash, simhash_b0=EXCLUDED.simhash_b0, simhash_b1=EXCLUDED.simhash_b1,
+	simhash_b2=EXCLUDED.simhash_b2, simhash_b3=EXCLUDED.simhash_b3, duplicate_of=EXCLUDED.duplicate_of,
 			crawled_at=NOW(),
 			-- This crawler re-authored the row, so it reclaims provenance (like the batch
 			-- upsertTail). Without it, a row re-crawled via the row-by-row FALLBACK keeps a stale
@@ -1568,7 +1586,38 @@ type crawlOut struct {
 	notmod bool        // 304 Not Modified → touch crawled_at only, don't rewrite the row
 }
 
-const upsertHead = `INSERT INTO website_info (domain,title,description,keywords,canonical,h1,status_code,content_type,content_length,latency_ms,redirects,outbound_links,image_count,word_count,charset,robots,og_title,og_image,twitter_card,page_language,server_header,fetch_error,etag,last_modified,crawled_at) VALUES `
+const upsertHead = `INSERT INTO website_info (domain,title,description,keywords,canonical,h1,status_code,content_type,content_length,latency_ms,redirects,outbound_links,image_count,word_count,charset,robots,og_title,og_image,twitter_card,page_language,server_header,fetch_error,etag,last_modified,simhash,simhash_b0,simhash_b1,simhash_b2,simhash_b3,duplicate_of,crawled_at) VALUES `
+
+// IG2: findDuplicate checks if a SimHash fingerprint is a near-duplicate of an
+// existing page. Uses the block-index technique: near-dupes (distance <= 3)
+// share at least one 16-bit block. Returns the duplicate domain, or "".
+func findDuplicate(ctx context.Context, db *sql.DB, fp uint64) string {
+	if fp == 0 {
+		return ""
+	}
+	blocks := simhash.Blocks(fp)
+	// Query candidates matching any block (indexed).
+	rows, err := db.QueryContext(ctx, `
+		SELECT domain, simhash FROM website_info
+		WHERE simhash_b0 = $1 OR simhash_b1 = $2 OR simhash_b2 = $3 OR simhash_b3 = $4
+		LIMIT 100`,
+		int16(blocks[0]), int16(blocks[1]), int16(blocks[2]), int16(blocks[3]))
+	if err != nil {
+		return ""
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var domain string
+		var stored int64
+		if err := rows.Scan(&domain, &stored); err != nil {
+			continue
+		}
+		if simhash.IsDuplicate(fp, uint64(stored)) {
+			return domain
+		}
+	}
+	return ""
+}
 
 const upsertTail = ` ON CONFLICT (domain) DO UPDATE SET
 	title=EXCLUDED.title, description=EXCLUDED.description, keywords=EXCLUDED.keywords,
@@ -1697,6 +1746,13 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 		case b.notmod:
 			notmod = append(notmod, b.domain)
 		default:
+			// IG2: check for near-duplicates before storing.
+			if b.info.SimHash != 0 {
+				if dup := findDuplicate(ctx, db, b.info.SimHash); dup != "" && dup != b.domain {
+					b.info.DuplicateOf = dup
+					minc(mCrawledDuplicates)
+				}
+			}
 			good = append(good, b)
 		}
 	}
@@ -1713,7 +1769,7 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 
 	// 1) multi-row upsert (ON CONFLICT refresh) for everything not blacklisted.
 	if len(good) > 0 {
-		const nc = 24
+		const nc = 30
 		var sb strings.Builder
 		sb.WriteString(upsertHead)
 		args := make([]interface{}, 0, len(good)*nc)
@@ -1736,7 +1792,9 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 				in.StatusCode, ns(in.ContentType), in.ContentLength, in.LatencyMs, in.RedirectCount,
 				in.OutboundLinkCount, in.ImageCount, in.WordCount, ns(in.Charset), ns(in.Robots),
 				ns(in.OGTitle), ns(in.OGImage), ns(in.TwitterCard), ns(in.PageLanguage), ns(in.ServerHeader),
-				b.ferr, ns(in.ETag), ns(in.LastModified))
+				b.ferr, ns(in.ETag), ns(in.LastModified),
+				int64(in.SimHash), int16(simhash.Blocks(in.SimHash)[0]), int16(simhash.Blocks(in.SimHash)[1]),
+				int16(simhash.Blocks(in.SimHash)[2]), int16(simhash.Blocks(in.SimHash)[3]), ns(in.DuplicateOf))
 		}
 		sb.WriteString(upsertTail)
 		if _, err := tx.ExecContext(ctx, sb.String(), args...); err != nil {
@@ -2499,6 +2557,9 @@ func parseHTMLInfo(root *html.Node, info *WebsiteInfo, domain string) {
 	base := strings.ToLower(strings.TrimPrefix(domain, "www."))
 	info.outDomains = make(map[string]bool, 16)
 	words := 0
+	// IG2: collect text for SimHash (capped to bound memory).
+	var textBuf strings.Builder
+	textBuf.Grow(8192)
 	var walk func(*html.Node)
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
@@ -2579,6 +2640,11 @@ func parseHTMLInfo(root *html.Node, info *WebsiteInfo, domain string) {
 			}
 		} else if n.Type == html.TextNode {
 			words += countWords(n.Data)
+			// IG2: accumulate text for SimHash, capped at 32KB.
+			if textBuf.Len() < 32768 {
+				textBuf.WriteString(n.Data)
+				textBuf.WriteByte(' ')
+			}
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
 			walk(c)
@@ -2586,6 +2652,10 @@ func parseHTMLInfo(root *html.Node, info *WebsiteInfo, domain string) {
 	}
 	walk(root)
 	info.WordCount = words // body text itself is never stored — only this count
+	// IG2: SimHash fingerprint for near-duplicate detection.
+	if textBuf.Len() > 0 {
+		info.SimHash = simhash.Fingerprint(textBuf.String())
+	}
 }
 
 // hasHost reports whether href can carry a URL host: it is hierarchical ("://")

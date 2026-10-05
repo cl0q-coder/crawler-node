@@ -205,9 +205,9 @@ func h1Host(url string) string {
 // withGuard runs f with netguard enforced (or not), restoring afterwards.
 func withGuard(t *testing.T, enforced bool, f func()) {
 	t.Helper()
-	old := netguard.AllowNonPublic
-	netguard.AllowNonPublic = !enforced
-	defer func() { netguard.AllowNonPublic = old }()
+	old := netguard.GetAllowNonPublicForTest()
+	netguard.SetAllowNonPublicForTest(!enforced)
+	defer func() { netguard.SetAllowNonPublicForTest(old) }()
 	f()
 }
 

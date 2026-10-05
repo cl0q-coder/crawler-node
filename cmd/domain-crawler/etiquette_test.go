@@ -20,7 +20,7 @@ import (
 // The fake servers below listen on 127.0.0.1, which netguard refuses; the guard is switched off inside this test
 // binary only. main() normally sets the User-Agent.
 func init() {
-	netguard.AllowNonPublic = true
+	netguard.SetAllowNonPublicForTest(true)
 	userAgent, _ = botid.UserAgent("test-node")
 }
 

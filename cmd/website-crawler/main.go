@@ -883,6 +883,12 @@ func main() {
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_domain_info_opic_score ON domain_info ((opic_history + opic_cash) DESC) WHERE web_crawled_at IS NULL AND dns_fail_count < 3`); err != nil {
 		log.Printf("ensure idx_domain_info_opic_score: %v", err)
 	}
+	// T3: adaptive recrawl interval. Per-domain interval in days; NULL means
+	// "use the global RECRAWL_DAYS". 304 (unchanged) backs off ×1.25 (cap 30d);
+	// 200 (changed) shortens ×0.75 (floor 1d).
+	if _, err := db.Exec(`ALTER TABLE domain_info ADD COLUMN IF NOT EXISTS recrawl_interval_days REAL`); err != nil {
+		log.Printf("ensure recrawl_interval_days: %v", err)
+	}
 	delStmt, err := db.Prepare(`DELETE FROM website_info WHERE domain = $1`)
 	if err != nil {
 		log.Fatalf("prepare delete: %v", err)
@@ -1162,10 +1168,11 @@ func selectFromSnapshot(db *sql.DB, pool, recrawl, maxPerBatch, maxReturn int) (
 		return nil, err
 	}
 	// Recrawl-due rows: an index range scan on idx_domain_info_web_crawled_at (empty until the first rows age past
-	// RECRAWL_DAYS), with the stored validators for conditional GETs.
+	// their interval), with the stored validators for conditional GETs.
+	// T3: per-domain adaptive interval (recrawl_interval_days, NULL = global RECRAWL_DAYS).
 	rows, err := db.Query(`WITH picked AS (
 			SELECT domain, coalesce(btrim(split_part(ip_addresses_ipv4, ',', 1)), '') AS ip
-			  FROM domain_info WHERE web_crawled_at < NOW() - make_interval(days => $1) AND dns_fail_count < 3 LIMIT $2)
+			  FROM domain_info WHERE web_crawled_at < NOW() - make_interval(days => COALESCE(recrawl_interval_days, $1)) AND dns_fail_count < 3 LIMIT $2)
 		SELECT p.domain, p.ip, coalesce(a.org, ''), wi.etag, wi.last_modified
 		  FROM picked p
 		  LEFT JOIN asninfo a ON a.ip = nullif(p.ip, '')
@@ -1787,9 +1794,50 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 
 	// 3) stamp EVERY attempted domain (crawl-state marker). Skipped when spooling to the local
 	//    outbox, whose domain_info has no web_crawled_at and where stamps aren't worth replaying.
+	//    T3: adaptive recrawl interval — 304s (unchanged) back off ×1.25 (cap 30d);
+	//    successful 200s (changed) shorten ×0.75 (floor 1d). Failures keep the
+	//    current interval. NULL interval means "global RECRAWL_DAYS".
 	if !skipStamp {
-		if _, err := tx.ExecContext(ctx, `UPDATE domain_info SET web_crawled_at = now() WHERE domain = ANY($1)`, pq.Array(all)); err != nil {
-			return 0, err
+		defInterval := float64(recrawlDays())
+		if len(notmod) > 0 {
+			if _, err := tx.ExecContext(ctx, `UPDATE domain_info
+				SET web_crawled_at = now(),
+				    recrawl_interval_days = LEAST(COALESCE(recrawl_interval_days, $2) * 1.25, 30)
+				WHERE domain = ANY($1)`, pq.Array(notmod), defInterval); err != nil {
+				return 0, err
+			}
+		}
+		goodDomains := make([]string, 0, len(good))
+		for _, b := range good {
+			goodDomains = append(goodDomains, b.domain)
+		}
+		if len(goodDomains) > 0 {
+			if _, err := tx.ExecContext(ctx, `UPDATE domain_info
+				SET web_crawled_at = now(),
+				    recrawl_interval_days = GREATEST(COALESCE(recrawl_interval_days, $2) * 0.75, 1)
+				WHERE domain = ANY($1)`, pq.Array(goodDomains), defInterval); err != nil {
+				return 0, err
+			}
+		}
+		// Domains neither 304 nor 200 (failures, etc.): stamp only, keep interval.
+		rest := make([]string, 0, len(all)-len(notmod)-len(goodDomains))
+		inNotmod := make(map[string]bool, len(notmod))
+		for _, d := range notmod {
+			inNotmod[d] = true
+		}
+		inGood := make(map[string]bool, len(goodDomains))
+		for _, d := range goodDomains {
+			inGood[d] = true
+		}
+		for _, d := range all {
+			if !inNotmod[d] && !inGood[d] {
+				rest = append(rest, d)
+			}
+		}
+		if len(rest) > 0 {
+			if _, err := tx.ExecContext(ctx, `UPDATE domain_info SET web_crawled_at = now() WHERE domain = ANY($1)`, pq.Array(rest)); err != nil {
+				return 0, err
+			}
 		}
 	}
 

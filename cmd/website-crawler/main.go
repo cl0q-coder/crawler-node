@@ -84,6 +84,7 @@ import (
 	"cl0q/crawlutil"
 	"cl0q/dbresil"
 	"cl0q/internal/config"
+	"cl0q/internal/footprint"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -190,6 +191,8 @@ func ipThrottle(ip string) { throttle(&ipGates, ip, ipDelay) }
 
 // userAgent comes from botid: the good-bot form "Mozilla/5.0 (compatible; cl0q-node/1.0; operator=<id>; +<url>)".
 // It never forges a real browser build — that trips WAF "client inconsistency" rules and reads as a deceptive bot.
+var fpChecker *footprint.Checker // NR3: nil until main() opens the DB
+
 var (
 	dialSem         chan struct{}
 	userAgent       string
@@ -260,6 +263,9 @@ func validateConfig() {
 	config.CheckIntRange("DB_MAXCONNS", config.GetInt("DB_MAXCONNS", 10), 1, 50)
 	config.CheckIntRange("DB_BATCH", config.GetInt("DB_BATCH", 200), 1, 2000)
 	config.CheckIntRange("SPOOL_MAX_ROWS", config.GetInt("SPOOL_MAX_ROWS", 500000), 0, 2000000)
+	config.CheckIntRange("NODE_MAX_DOMAINS", config.GetInt("NODE_MAX_DOMAINS", 1000000), 0, 10000000)
+	config.CheckIntRange("NODE_MAX_PAGES", config.GetInt("NODE_MAX_PAGES", 1000000), 0, 10000000)
+	config.CheckIntRange("NODE_MAX_DB_GB", config.GetInt("NODE_MAX_DB_GB", 20), 0, 1000)
 	config.CheckIntRange("BATCH", config.GetInt("BATCH", 500), 1, 5000)
 	config.CheckIntRange("ASN_POOL_FACTOR", config.GetInt("ASN_POOL_FACTOR", 3), 1, 10)
 	config.CheckIntRange("SAMPLE", config.GetInt("SAMPLE", 0), 0, 100000)
@@ -732,6 +738,7 @@ func main() {
 	// only a few DB conns regardless of worker count. Keep the pool small to stay
 	// well clear of the shared 100-conn budget (was workers+16 = 48).
 	db.SetMaxOpenConns(dbConns)
+	fpChecker = footprint.New(db) // NR3: bounded footprint
 	db.SetMaxIdleConns(min(4, dbConns))
 	db.SetConnMaxLifetime(5 * time.Minute)
 	if dbresil.WaitForRemoteCtx(ctx, db) != nil { // wait out a database outage at startup instead of crash-looping
@@ -1544,6 +1551,18 @@ func flushBatch(remote *sql.DB, spool *dbresil.Spooler, batch []crawlOut, upsert
 	if len(batch) == 0 {
 		return 0
 	}
+	// NR3: at the pages cap, only update rows that already exist — new
+	// domains are skipped (they stay unstamped and are retried when there's
+	// room). Updates don't grow the table.
+	if fpChecker != nil {
+		if pause, reason := fpChecker.PauseNewPages(); pause {
+			batch = filterExistingDomains(remote, batch)
+			log.Printf("[INFO] %s — %d existing-domain update(s) kept", reason, len(batch))
+			if len(batch) == 0 {
+				return 0
+			}
+		}
+	}
 	// Bound the whole batch write with its own deadline, derived from Background
 	// (NOT a shutdown ctx) — so a wedged connect/commit is cut off while a graceful restart still lets
 	// an in-flight batch COMMIT rather than discarding completed crawl work. Same ctx for the spool path.
@@ -1576,6 +1595,34 @@ func flushBatch(remote *sql.DB, spool *dbresil.Spooler, batch []crawlOut, upsert
 	}
 	log.Printf("batch flush failed (%v) — falling back to row-by-row for %d row(s)", err, len(batch))
 	return flushRowByRow(batch, upsert, delStmt, stampStmt, emitStmt, touchStmt)
+}
+
+// filterExistingDomains keeps only batch entries whose domain is already in
+// website_info (NR3: at the pages cap, updates are fine, inserts are not).
+func filterExistingDomains(db *sql.DB, batch []crawlOut) []crawlOut {
+	domains := make([]string, 0, len(batch))
+	for _, b := range batch {
+		domains = append(domains, b.domain)
+	}
+	rows, err := db.Query(`SELECT domain FROM website_info WHERE domain = ANY($1)`, pq.Array(domains))
+	if err != nil {
+		log.Printf("footprint: existing-domain check failed (%v) — keeping full batch", err)
+		return batch
+	}
+	defer rows.Close()
+	exists := map[string]bool{}
+	for rows.Next() {
+		var d string
+		rows.Scan(&d)
+		exists[d] = true
+	}
+	out := batch[:0]
+	for _, b := range batch {
+		if exists[b.domain] {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled bool, skipStamp bool) (int, error) {

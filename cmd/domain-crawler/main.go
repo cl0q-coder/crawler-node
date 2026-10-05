@@ -55,6 +55,7 @@ import (
 	"cl0q/crawlutil"
 	"cl0q/dbresil"
 	"cl0q/internal/config"
+	"cl0q/internal/footprint"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -314,6 +315,9 @@ func validateConfig() {
 	config.CheckDurationRange("host-delay-ms", time.Duration(*hostDelayMs)*time.Millisecond, time.Duration(minHostDelayMs)*time.Millisecond, time.Hour)
 	config.CheckIntRange("per-host-pages", *perHostPages, 1, maxPerHostPages)
 	config.CheckIntRange("SPOOL_MAX_ROWS", config.GetInt("SPOOL_MAX_ROWS", 500000), 0, 2000000)
+	config.CheckIntRange("NODE_MAX_DOMAINS", config.GetInt("NODE_MAX_DOMAINS", 1000000), 0, 10000000)
+	config.CheckIntRange("NODE_MAX_PAGES", config.GetInt("NODE_MAX_PAGES", 1000000), 0, 10000000)
+	config.CheckIntRange("NODE_MAX_DB_GB", config.GetInt("NODE_MAX_DB_GB", 20), 0, 1000)
 	config.CheckNonEmpty("dsn", *dsnFlag)
 }
 
@@ -344,6 +348,9 @@ func main() {
 	// Shared DB has max_connections=100; this BFS is single-threaded, so a small
 	// cap is plenty and guarantees we never contribute to "too many clients".
 	db.SetMaxOpenConns(*maxConns)
+	// NR3: bounded footprint — when the DB hits a cap, discovery pauses but
+	// crawling/forwarding continues.
+	fp := footprint.New(db)
 	db.SetMaxIdleConns(2)
 	db.SetConnMaxLifetime(5 * time.Minute)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS domain_info (
@@ -424,7 +431,15 @@ func main() {
 		// Buffer discovered domains and insert them in batches of *batchFlag (one commit per
 		// batch instead of one per domain) — the main reduction in remote-Postgres load.
 		buf := make([]pendDomain, 0, *batchFlag)
-		flush := func() { inserted += flushDomains(db, spool, buf); buf = buf[:0] }
+		flush := func() {
+			if pause, reason := fp.PauseDiscovery(); pause {
+				log.Printf("[INFO] %s — %d new domains not stored", reason, len(buf))
+				buf = buf[:0]
+				return
+			}
+			inserted += flushDomains(db, spool, buf)
+			buf = buf[:0]
+		}
 
 		for len(queue) > 0 && ctx.Err() == nil {
 			// Time-based heartbeat at the TOP of the loop: robots fetches, deferrals and skips `continue` before the

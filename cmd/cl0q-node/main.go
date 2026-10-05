@@ -44,6 +44,7 @@ import (
 	"cl0q/botid"
 	"cl0q/internal/config"
 	"cl0q/internal/metrics"
+	"cl0q/internal/version"
 )
 
 func env(k, def string) string {
@@ -135,6 +136,13 @@ func validateConfig() {
 }
 
 func main() {
+	// -version before anything else.
+	for _, a := range os.Args[1:] {
+		if a == "-version" || a == "--version" {
+			fmt.Println("cl0q-node", version.Version)
+			return
+		}
+	}
 	// Subcommand before flag parsing: `cl0q-node enroll` (PROTOCOL.md §1).
 	if len(os.Args) > 1 && os.Args[1] == "enroll" {
 		runEnrollCommand(os.Args[2:])

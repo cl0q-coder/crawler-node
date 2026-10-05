@@ -26,6 +26,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"cl0q/internal/config"
+	"cl0q/internal/version"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -37,6 +38,12 @@ type checkResult struct {
 }
 
 func main() {
+	for _, a := range os.Args[1:] {
+		if a == "-version" || a == "--version" {
+			fmt.Println("preflight", version.Version)
+			return
+		}
+	}
 	config.SetMemoryLimitDefault(512 << 20) // preflight is light; 512MiB is plenty
 
 	results := []checkResult{

@@ -87,6 +87,8 @@ import (
 	"cl0q/internal/simhash"
 	"cl0q/internal/sitemap"
 	"cl0q/internal/tunable"
+	"cl0q/internal/version"
+	"cl0q/internal/warc"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -237,6 +239,9 @@ var fpChecker *footprint.Checker // NR3: nil until main() opens the DB
 var mreg *metrics.Registry
 var mCrawledOK, mCrawledFailed, mCrawledSkipped, mCrawledChallenged, mCrawledUnchanged, mCrawledDeferred, mCrawledBlocked, mCrawledDuplicates, mSitemapFound, mTrapsFlagged *atomic.Int64
 var sitemapFetch bool
+var warcWriter *warc.Writer
+var warcFile *os.File
+var warcMu sync.Mutex // IG4: serializes WARC writes
 
 var mBreakerOpen *atomic.Int64
 
@@ -799,6 +804,18 @@ func main() {
 	db.SetMaxOpenConns(dbConns)
 	fpChecker = footprint.New(db)                  // NR3: bounded footprint
 	sitemapFetch = envBool("SITEMAP_FETCH", false) // IG3: fetch /sitemap.xml for recrawl signals (opt-in, doubles requests)
+	// IG4: WARC output (opt-in via WARC_DIR).
+	if wd := os.Getenv("WARC_DIR"); wd != "" {
+		if err := os.MkdirAll(wd, 0755); err == nil {
+			warcPath := wd + "/cl0q-" + time.Now().Format("20060102-150405") + ".warc"
+			if f, err := os.Create(warcPath); err == nil {
+				warcFile = f
+				warcWriter = warc.New(f)
+				_ = warcWriter.WriteInfo("cl0q-node", "cl0q-crawler/"+version.Version)
+				log.Printf("IG4: WARC output enabled: %s", warcPath)
+			}
+		}
+	}
 	// NR6: observability.
 	mreg = metrics.NewRegistry()
 	mCrawledOK = mreg.Counter("crawler_pages_ok_total", "pages successfully crawled")
@@ -2719,6 +2736,22 @@ func parseRetryAfter(v string) time.Duration {
 
 // fetchWebsiteInfo fetches one homepage (https, or http only when https isn't offered) and parses it. rules are the
 // robots.txt rules of domain, used to check redirect hops (see pageRedirectPolicy).
+// IG4: buildWARCResponse reconstructs the raw HTTP response for WARC.
+func buildWARCResponse(resp *http.Response, body []byte) []byte {
+	var buf bytes.Buffer
+	// Status line.
+	fmt.Fprintf(&buf, "HTTP/%d.%d %s\r\n", resp.ProtoMajor, resp.ProtoMinor, resp.Status)
+	// Headers.
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			fmt.Fprintf(&buf, "%s: %s\r\n", k, v)
+		}
+	}
+	buf.WriteString("\r\n")
+	buf.Write(body)
+	return buf.Bytes()
+}
+
 func fetchWebsiteInfo(ctx context.Context, domain, ip, etag, lastModified string, rules *robotstxt.Rules) (info *WebsiteInfo, err error) {
 	var redirects int
 	var offsite string // host of an off-site redirect we stopped at
@@ -2826,6 +2859,12 @@ func fetchWebsiteInfo(ctx context.Context, domain, ip, etag, lastModified string
 	// the 2GB box. Only the title, metadata, links and a word count are kept (never the page text),
 	// so 2MiB is ample (>99% of real HTML pages are <2MiB); the tail just gets truncated, not dropped.
 	bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	// IG4: write WARC response record (opt-in).
+	if warcWriter != nil && len(bodyBytes) > 0 {
+		warcMu.Lock()
+		_ = warcWriter.WriteResponse(resp.Request.URL.String(), buildWARCResponse(resp, bodyBytes), "")
+		warcMu.Unlock()
+	}
 	// An empty body with a text/html Content-Type (common for autodiscover/ftp/email
 	// infra hosts, 204s, redirect-to-blank) has nothing to parse. Bail here: on empty
 	// input charset.NewReader returns (nil, io.EOF), and html.Parse(nil) then panics

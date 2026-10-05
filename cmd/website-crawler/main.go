@@ -1265,9 +1265,12 @@ func crawlBatch(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, targets
 	total := len(targets)
 	log.Printf("crawling %d domain(s)", total)
 
-	// Interleave the batch so same-host names (which arrive clustered from the DB) aren't
-	// adjacent. Idle pacing gates are pruned, never reset (see hostGate).
-	rand.Shuffle(len(targets), func(i, j int) { targets[i], targets[j] = targets[j], targets[i] })
+	// T4: front/back queue split. Instead of shuffling targets and letting workers
+	// sleep in hostThrottle, group by host (front queues) and only hand out
+	// targets whose host is already eligible. Workers never block on politeness;
+	// the throttle gates remain as a safety net.
+	// (The old rand.Shuffle is gone: OPIC score order from the frontier is the priority.)
+	fq := newFrontQueue(targets, hostDelay)
 	pruneGates(&hostGates, gateIdle)
 	pruneGates(&ipGates, gateIdle)
 	// robotsCache is keyed per DOMAIN, but every domain is crawled ~once (web_crawled_at),
@@ -1294,13 +1297,28 @@ func crawlBatch(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, targets
 		}()
 	}
 	go func() { wg.Wait(); close(results) }()
+	// T4: feed jobs from the front/back queue — only eligible hosts are handed
+	// out. When no host is eligible, wait until the next one becomes eligible
+	// instead of handing out work that would make a worker sleep.
 	go func() {
 		defer close(jobs)
-		for _, t := range targets {
+		for {
+			if t, ok := fq.next(time.Now()); ok {
+				select {
+				case jobs <- t:
+				case <-ctx.Done():
+					return // shutting down: hand out nothing more; the rest stay unstamped for the next run
+				}
+				continue
+			}
+			wait := fq.waitDuration(time.Now())
+			if wait < 0 {
+				return // all queues drained
+			}
 			select {
-			case jobs <- t:
+			case <-time.After(wait):
 			case <-ctx.Done():
-				return // shutting down: hand out nothing more; the rest stay unstamped for the next run
+				return
 			}
 		}
 	}()

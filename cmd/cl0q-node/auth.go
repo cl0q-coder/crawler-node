@@ -3,9 +3,10 @@
 // The ingest is a public boundary, so token failures get explicit,
 // non-spinning handling:
 //
-//   - 401 (expired/invalid token): try automatic re-enrol (idempotent
-//     rotation) when the node enrolled via `cl0q-node enroll` (we have a
-//     node_id to rotate). The batch is retried once with the fresh token.
+//   - 401 (expired/invalid token): try automatic re-enrol (authenticated
+//     rotation with node_id + refresh_secret, PROTOCOL.md §1) when the node
+//     enrolled via `cl0q-node enroll` (we have credentials to rotate). The
+//     batch is retried once with the fresh token.
 //   - 401 with a NODE_TOKEN env var (no credential file): can't rotate
 //     automatically — log exactly what to do and back off.
 //   - 403 + {"revoked": true}: the token is dead. Wipe it locally, tell
@@ -27,13 +28,16 @@ import (
 )
 
 // tokenSource holds the current ingest credentials. The token is mutable:
-// rotation swaps it without restarting the forwarder.
+// rotation swaps it without restarting the forwarder. The refresh_secret
+// authenticates rotation (PROTOCOL.md §1) and is wiped alongside the token
+// on revocation.
 type tokenSource struct {
-	mu        sync.Mutex
-	token     string
-	nodeID    string
-	credPath  string // "" when the token came from env (no auto-rotation)
-	ingestURL string
+	mu            sync.Mutex
+	token         string
+	refreshSecret string
+	nodeID        string
+	credPath      string // "" when the token came from env (no auto-rotation)
+	ingestURL     string
 
 	authFails int       // consecutive auth failures (for backoff)
 	backoff   time.Time // don't attempt sends before this (auth backoff)
@@ -110,11 +114,13 @@ func (ts *tokenSource) handleAuthFailure(status int, body string) (retry bool) {
 	}
 
 	if status == 403 && isRevoked(body) {
-		// The token is dead. Wipe it so nothing keeps trying it, keep the
-		// node_id so `cl0q-node enroll` can rotate in place.
+		// The token is dead. Wipe it so nothing keeps trying it; keep the
+		// node_id + refresh_secret so `cl0q-node enroll` can attempt an
+		// authenticated rotation — the server decides whether the node may
+		// come back (a true ban fails the rotation with 401).
 		ts.token = ""
 		if ts.credPath != "" {
-			if err := writeCredentials(ts.credPath, ts.nodeID, ""); err != nil {
+			if err := writeCredentials(ts.credPath, nodeCredentials{NodeID: ts.nodeID, RefreshSecret: ts.refreshSecret}); err != nil {
 				log.Printf("ingest auth: failed to wipe revoked token: %v", err)
 			}
 		}
@@ -139,12 +145,14 @@ func (ts *tokenSource) handleAuthFailure(status int, body string) (retry bool) {
 	if err != nil {
 		return fail("HTTP 401 — automatic re-enrol failed: " + err.Error())
 	}
-	// Re-enrol rewrote the credential file; reload it.
+	// Re-enrol rewrote the credential file; reload it (token and the
+	// refresh_secret the rotation returned).
 	data, rerr := loadCredentialsFrom(ts.credPath)
 	if rerr != nil {
 		return fail("HTTP 401 — re-enrolled but could not reload credentials: " + rerr.Error())
 	}
 	ts.token = data.Token
+	ts.refreshSecret = data.RefreshSecret
 	ts.nodeID = data.NodeID
 	ts.authFails = 0
 	ts.backoff = time.Time{}

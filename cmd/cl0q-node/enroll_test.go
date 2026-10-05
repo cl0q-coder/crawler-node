@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -20,7 +21,7 @@ func TestWriteCredentialsMode0600(t *testing.T) {
 	if err := os.WriteFile(path, []byte("{}"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeCredentials(path, "nd-test1", "secret-token"); err != nil {
+	if err := writeCredentials(path, nodeCredentials{NodeID: "nd-test1", Token: "secret-token", RefreshSecret: "rs-test1"}); err != nil {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(path)
@@ -35,7 +36,7 @@ func TestWriteCredentialsMode0600(t *testing.T) {
 	if err := json.Unmarshal(data, &creds); err != nil {
 		t.Fatal(err)
 	}
-	if creds.NodeID != "nd-test1" || creds.Token != "secret-token" {
+	if creds.NodeID != "nd-test1" || creds.Token != "secret-token" || creds.RefreshSecret != "rs-test1" {
 		t.Errorf("round-trip mismatch: %+v", creds)
 	}
 }
@@ -43,32 +44,32 @@ func TestWriteCredentialsMode0600(t *testing.T) {
 func TestLoadCredentialsPrecedence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "creds.json")
-	if err := writeCredentials(path, "nd-file", "file-token"); err != nil {
+	if err := writeCredentials(path, nodeCredentials{NodeID: "nd-file", Token: "file-token", RefreshSecret: "rs-file"}); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("NODE_CREDENTIALS_FILE", path)
 
-	// Env wins over file.
+	// Env wins over file (env carries no refresh_secret — it cannot rotate).
 	t.Setenv("NODE_TOKEN", "env-token")
 	t.Setenv("CL0Q_NODE_ID", "nd-env")
-	id, tok, err := loadCredentials()
-	if err != nil || id != "nd-env" || tok != "env-token" {
-		t.Errorf("env precedence: got (%q,%q,%v)", id, tok, err)
+	creds, err := loadCredentials()
+	if err != nil || creds.NodeID != "nd-env" || creds.Token != "env-token" || creds.RefreshSecret != "" {
+		t.Errorf("env precedence: got (%+v,%v)", creds, err)
 	}
 
 	// File used when env absent.
 	os.Unsetenv("NODE_TOKEN")
 	os.Unsetenv("CL0Q_NODE_ID")
-	id, tok, err = loadCredentials()
-	if err != nil || id != "nd-file" || tok != "file-token" {
-		t.Errorf("file fallback: got (%q,%q,%v)", id, tok, err)
+	creds, err = loadCredentials()
+	if err != nil || creds.NodeID != "nd-file" || creds.Token != "file-token" || creds.RefreshSecret != "rs-file" {
+		t.Errorf("file fallback: got (%+v,%v)", creds, err)
 	}
 
 	// Missing file is not an error (means "not enrolled yet").
 	t.Setenv("NODE_CREDENTIALS_FILE", filepath.Join(dir, "nope.json"))
-	id, tok, err = loadCredentials()
-	if err != nil || id != "" || tok != "" {
-		t.Errorf("missing file: got (%q,%q,%v)", id, tok, err)
+	creds, err = loadCredentials()
+	if err != nil || creds.NodeID != "" || creds.Token != "" {
+		t.Errorf("missing file: got (%+v,%v)", creds, err)
 	}
 }
 
@@ -88,7 +89,7 @@ func TestRunEnrollRoundTrip(t *testing.T) {
 		gotNodeID = er.NodeID
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(enrollResponse{
-			NodeID: "nd-mock1", Token: "mock-secret", Quarantined: true,
+			NodeID: "nd-mock1", Token: "mock-secret", RefreshSecret: "rs-mock1", Quarantined: true,
 		})
 	}))
 	defer srv.Close()
@@ -116,44 +117,88 @@ func TestRunEnrollRoundTrip(t *testing.T) {
 	if fi.Mode().Perm() != 0600 {
 		t.Errorf("mode = %o, want 0600", fi.Mode().Perm())
 	}
-	id, tok, _ := loadCredentials()
-	if id != "nd-mock1" || tok != "mock-secret" {
-		t.Errorf("stored credentials wrong: %q %q", id, tok)
+	creds, _ := loadCredentials()
+	if creds.NodeID != "nd-mock1" || creds.Token != "mock-secret" || creds.RefreshSecret != "rs-mock1" {
+		t.Errorf("stored credentials wrong: %+v", creds)
 	}
 	if gotNodeID != "" {
 		t.Errorf("fresh enrol should not send node_id, sent %q", gotNodeID)
 	}
 }
 
-func TestRunEnrollRotationSendsNodeID(t *testing.T) {
-	var gotNodeID string
+func TestRunEnrollRejectsMissingRefreshSecret(t *testing.T) {
+	// A server that omits refresh_secret violates PROTOCOL.md §1 —
+	// enrol must fail loudly rather than store a half credential.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var er enrollRequest
-		body, _ := io.ReadAll(r.Body)
-		json.Unmarshal(body, &er)
-		gotNodeID = er.NodeID
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(enrollResponse{NodeID: "nd-rot1", Token: "new-secret"})
+		json.NewEncoder(w).Encode(enrollResponse{NodeID: "nd-mock2", Token: "mock-secret"})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.json")
+	if err := doEnroll(srv.URL, "", path); err == nil {
+		t.Fatal("enrol without refresh_secret should fail")
+	} else if !strings.Contains(err.Error(), "refresh_secret") {
+		t.Errorf("error should mention refresh_secret, got %q", err.Error())
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Error("failed enrol must not leave a credential file behind")
+	}
+}
+
+func TestRunEnrollRotationSendsNodeIDAndRefreshSecret(t *testing.T) {
+	var got enrollRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &got)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(enrollResponse{NodeID: "nd-rot1", Token: "new-secret", RefreshSecret: "rs-rot1"})
 	}))
 	defer srv.Close()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "creds.json")
 	// Pre-existing credentials: this is a rotation.
-	if err := writeCredentials(path, "nd-old1", "old-secret"); err != nil {
+	if err := writeCredentials(path, nodeCredentials{NodeID: "nd-old1", Token: "old-secret", RefreshSecret: "rs-old1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := doEnroll(srv.URL, "", path); err != nil {
 		t.Fatal(err)
 	}
-	if gotNodeID != "nd-old1" {
-		t.Errorf("rotation should send existing node_id, sent %q", gotNodeID)
+	if got.NodeID != "nd-old1" || got.RefreshSecret != "rs-old1" {
+		t.Errorf("rotation must send node_id + refresh_secret, sent %+v", got)
 	}
-	id, tok, _ := loadCredentials()
-	// loadCredentials needs the env path override:
 	t.Setenv("NODE_CREDENTIALS_FILE", path)
-	id, tok, _ = loadCredentials()
-	if id != "nd-rot1" || tok != "new-secret" {
-		t.Errorf("rotated credentials wrong: %q %q", id, tok)
+	creds, _ := loadCredentials()
+	if creds.NodeID != "nd-rot1" || creds.Token != "new-secret" || creds.RefreshSecret != "rs-rot1" {
+		t.Errorf("rotated credentials wrong: %+v", creds)
+	}
+}
+
+func TestRunEnrollLegacyCredsFallBackToFreshEnrol(t *testing.T) {
+	// A credential file from before refresh_secret existed cannot
+	// authenticate rotation — the client must NOT send the bare node_id
+	// (PROTOCOL.md §1). It fresh-enrols instead.
+	var got enrollRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		json.Unmarshal(body, &got)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(enrollResponse{NodeID: "nd-fresh9", Token: "fresh-secret", RefreshSecret: "rs-fresh9"})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.json")
+	legacy, _ := json.Marshal(nodeCredentials{NodeID: "nd-legacy", Token: "legacy-secret"})
+	if err := os.WriteFile(path, legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := doEnroll(srv.URL, "", path); err != nil {
+		t.Fatal(err)
+	}
+	if got.NodeID != "" || got.RefreshSecret != "" {
+		t.Errorf("legacy creds must trigger fresh enrol (no node_id sent), sent %+v", got)
 	}
 }

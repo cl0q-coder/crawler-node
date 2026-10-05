@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"cl0q/dbresil"
+	"cl0q/internal/config"
 	"github.com/lib/pq"
 	"golang.org/x/net/publicsuffix"
 )
@@ -143,8 +144,27 @@ func resolveOne(host string) res {
 	return r
 }
 
+// validateConfig checks every knob at startup (NR2). A bad value is a FATAL
+// error with a clear message — never a silent clamp or silent default.
+// Call this FIRST in main.
+func validateConfig() {
+	// Polite default: cap the heap at 2GiB. An explicit GOMEMLIMIT env wins.
+	config.SetMemoryLimitDefault(2 << 30)
+
+	config.CheckIntRange("BATCH", config.GetInt("BATCH", 2000), 1, 10000)
+	config.CheckIntRange("WORKERS", config.GetInt("WORKERS", 16), 1, 64)
+	config.CheckDurationRange("DNS_TIMEOUT_MS", config.GetDurationMs("DNS_TIMEOUT_MS", 3000*time.Millisecond), 500*time.Millisecond, 30*time.Second)
+	config.CheckIntRange("DNS_RECHECK_HOURS", config.GetInt("DNS_RECHECK_HOURS", 12), 1, 720)
+	config.CheckIntRange("DB_MAXCONNS", config.GetInt("DB_MAXCONNS", 4), 1, 50)
+	// LOOP is strict-parsed so a typo can't silently change run mode.
+	if raw := os.Getenv("LOOP"); raw != "" && raw != "0" && raw != "1" {
+		log.Fatalf("invalid LOOP=%q: must be 0 or 1", raw)
+	}
+}
+
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	dsn := env("DATABASE_URL", "postgres://cl0q:cl0q@localhost:5432/cl0q?sslmode=disable")

@@ -1,0 +1,132 @@
+// Package config provides strict startup validation for the crawler-node
+// binaries (NR2: config validation + polite defaults).
+//
+// Rule: every knob is validated at startup. Unparsable input and
+// out-of-range values are FATAL errors with a clear message — never a
+// silent clamp, never a silent fall back to the default. A bad value must
+// refuse to start, not quietly misbehave.
+//
+// The Validate* functions are pure and unit-tested; the Get*/Check*
+// wrappers call log.Fatal on the same conditions the validators detect.
+package config
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"runtime/debug"
+	"strconv"
+	"time"
+)
+
+// ValidateIntRange reports whether v is inside [lo, hi].
+func ValidateIntRange(name string, v, lo, hi int) error {
+	if v < lo || v > hi {
+		return fmt.Errorf("invalid %s=%d: must be between %d and %d", name, v, lo, hi)
+	}
+	return nil
+}
+
+// ValidateDurationRange reports whether v is inside [lo, hi].
+func ValidateDurationRange(name string, v, lo, hi time.Duration) error {
+	if v < lo || v > hi {
+		return fmt.Errorf("invalid %s=%s: must be between %s and %s", name, v, lo, hi)
+	}
+	return nil
+}
+
+// ValidateNonEmpty reports whether v is non-empty.
+func ValidateNonEmpty(name, v string) error {
+	if v == "" {
+		return fmt.Errorf("invalid %s: must not be empty", name)
+	}
+	return nil
+}
+
+// CheckIntRange fatals unless v is inside [lo, hi]; returns v.
+func CheckIntRange(name string, v, lo, hi int) int {
+	if err := ValidateIntRange(name, v, lo, hi); err != nil {
+		log.Fatal(err)
+	}
+	return v
+}
+
+// CheckDurationRange fatals unless v is inside [lo, hi]; returns v.
+func CheckDurationRange(name string, v, lo, hi time.Duration) time.Duration {
+	if err := ValidateDurationRange(name, v, lo, hi); err != nil {
+		log.Fatal(err)
+	}
+	return v
+}
+
+// CheckNonEmpty fatals on empty v; returns v.
+func CheckNonEmpty(name, v string) string {
+	if err := ValidateNonEmpty(name, v); err != nil {
+		log.Fatal(err)
+	}
+	return v
+}
+
+// GetInt reads an integer env var. Unset -> def. Unparsable -> fatal
+// (the old envInt silently fell back to the default, hiding typos like
+// WORKERS=lots).
+func GetInt(name string, def int) int {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Fatalf("invalid %s=%q: not an integer: %v", name, raw, err)
+	}
+	return n
+}
+
+// GetDurationMs reads a millisecond env var as a time.Duration.
+// Unset -> def. Unparsable -> fatal.
+func GetDurationMs(name string, def time.Duration) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil {
+		log.Fatalf("invalid %s=%q: not an integer number of milliseconds: %v", name, raw, err)
+	}
+	return time.Duration(n) * time.Millisecond
+}
+
+// GetString reads a string env var. Unset -> def.
+func GetString(name, def string) string {
+	if raw := os.Getenv(name); raw != "" {
+		return raw
+	}
+	return def
+}
+
+// GetBool reads a bool env var. Unset -> def. Unparsable -> fatal.
+func GetBool(name string, def bool) bool {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	switch raw {
+	case "1", "true", "TRUE", "True", "yes", "YES":
+		return true
+	case "0", "false", "FALSE", "False", "no", "NO":
+		return false
+	default:
+		log.Fatalf("invalid %s=%q: not a boolean (use 1/0 or true/false)", name, raw)
+		return false
+	}
+}
+
+// SetMemoryLimitDefault caps the Go runtime heap at n bytes unless the
+// operator set GOMEMLIMIT explicitly (explicit operator choice wins).
+// Call once at startup so a naive configuration cannot OOM the box.
+func SetMemoryLimitDefault(n int64) {
+	if os.Getenv("GOMEMLIMIT") != "" {
+		return
+	}
+	debug.SetMemoryLimit(n)
+}

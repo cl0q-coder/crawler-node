@@ -54,6 +54,7 @@ import (
 	"cl0q/botid"
 	"cl0q/crawlutil"
 	"cl0q/dbresil"
+	"cl0q/internal/config"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -291,12 +292,40 @@ var httpClient = &http.Client{
 	CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 }
 
+// validateConfig checks every knob at startup (NR2). A bad value is a FATAL
+// error with a clear message — never a silent clamp or a silent fall back
+// to the default. Call this FIRST in main, after flag.Parse.
+// When adding a new knob, add its check here.
+func validateConfig() {
+	// Polite default: cap the heap at 2GiB so a naive configuration cannot
+	// OOM the operator's box. An explicit GOMEMLIMIT env wins.
+	config.SetMemoryLimitDefault(2 << 30)
+
+	config.CheckIntRange("max-depth", *maxDepth, 0, 20)
+	config.CheckDurationRange("idle", *idleFlag, minIdle, time.Hour)
+	config.CheckIntRange("max-pages", *maxPages, 1, 100000)
+	config.CheckIntRange("max-conns", *maxConns, 1, 50)
+	config.CheckIntRange("db-seeds", *dbSeedsN, 0, 10000)
+	config.CheckIntRange("db-batch", *batchFlag, 1, 5000)
+	// queue-cap 0 = unbounded is allowed explicitly, but anything else must be sane.
+	config.CheckIntRange("queue-cap", *queueCap, 0, 2000000)
+	// Politeness floors are hard minimums: the crawler can only be made
+	// slower or gentler than these, never faster.
+	config.CheckDurationRange("host-delay-ms", time.Duration(*hostDelayMs)*time.Millisecond, time.Duration(minHostDelayMs)*time.Millisecond, time.Hour)
+	config.CheckIntRange("per-host-pages", *perHostPages, 1, maxPerHostPages)
+	config.CheckIntRange("SPOOL_MAX_ROWS", config.GetInt("SPOOL_MAX_ROWS", 500000), 0, 2000000)
+	config.CheckNonEmpty("dsn", *dsnFlag)
+}
+
 func main() {
 	flag.Parse()
+	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	userAgent = botid.MustUserAgent()
 	// Politeness floors: a setting can only make the crawler gentler.
+	// (validateConfig already rejected anything below the floors; the
+	// max/min calls below are defense-in-depth.)
 	*hostDelayMs = max(*hostDelayMs, minHostDelayMs)
 	*perHostPages = min(max(*perHostPages, 1), maxPerHostPages)
 	*idleFlag = max(*idleFlag, minIdle)

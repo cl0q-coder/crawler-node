@@ -82,6 +82,7 @@ import (
 	"cl0q/botid"
 	"cl0q/crawlutil"
 	"cl0q/dbresil"
+	"cl0q/internal/config"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -238,6 +239,64 @@ func loadPoliteness() {
 
 // recrawlDays is how old a page must be before it is fetched again (never less than minRecrawlDays).
 func recrawlDays() int { return max(envInt("RECRAWL_DAYS", minRecrawlDays), minRecrawlDays) }
+
+// validateConfig checks every knob at startup (NR2). A bad value is a FATAL
+// error with a clear message — never a silent clamp or a silent fall back
+// to the default. Call this FIRST in main, before anything reads config.
+// The clampInt/max calls below remain as defense-in-depth, but after this
+// function they can only see values that already passed validation.
+//
+// When adding a new knob, add its check here.
+func validateConfig() {
+	// Polite default: cap the heap at 2GiB so a naive configuration cannot
+	// OOM the operator's box. An explicit GOMEMLIMIT env wins.
+	config.SetMemoryLimitDefault(2 << 30)
+
+	// Throughput / concurrency.
+	config.CheckIntRange("WORKERS", config.GetInt("WORKERS", 16), 1, 64)
+	config.CheckIntRange("MAX_CONNS", config.GetInt("MAX_CONNS", 48), 1, 256)
+	config.CheckIntRange("FETCH_TIMEOUT_MS", config.GetInt("FETCH_TIMEOUT_MS", 20000), 2000, 60000)
+	config.CheckIntRange("DB_MAXCONNS", config.GetInt("DB_MAXCONNS", 10), 1, 50)
+	config.CheckIntRange("DB_BATCH", config.GetInt("DB_BATCH", 200), 1, 2000)
+	config.CheckIntRange("SPOOL_MAX_ROWS", config.GetInt("SPOOL_MAX_ROWS", 500000), 0, 2000000)
+	config.CheckIntRange("BATCH", config.GetInt("BATCH", 500), 1, 5000)
+	config.CheckIntRange("ASN_POOL_FACTOR", config.GetInt("ASN_POOL_FACTOR", 3), 1, 10)
+	config.CheckIntRange("SAMPLE", config.GetInt("SAMPLE", 0), 0, 100000)
+	config.CheckIntRange("FRONTIER_MAX", config.GetInt("FRONTIER_MAX", 400000), 1, 2000000)
+	config.CheckIntRange("FRONTIER_REFRESH_S", config.GetInt("FRONTIER_REFRESH_S", 300), 60, 86400)
+
+	// Politeness: the floors are hard minimums from https://cl0q.com/bot.
+	// A setting that would make the crawler faster than the floor is
+	// rejected — it can only make the crawler slower or gentler.
+	config.CheckDurationRange("HOST_DELAY_MS", config.GetDurationMs("HOST_DELAY_MS", minHostDelay), minHostDelay, time.Hour)
+	config.CheckDurationRange("IP_DELAY_MS", config.GetDurationMs("IP_DELAY_MS", minIPDelay), minIPDelay, time.Hour)
+	config.CheckIntRange("ASN_MAX_PER_BATCH", config.GetInt("ASN_MAX_PER_BATCH", maxPerGroup), 1, maxPerGroup)
+	config.CheckIntRange("THROTTLE_RETRIES", config.GetInt("THROTTLE_RETRIES", 1), 0, 1)
+	config.CheckDurationRange("THROTTLE_WAIT_MAX_MS", config.GetDurationMs("THROTTLE_WAIT_MAX_MS", maxRetryWait), 0, maxRetryWait)
+	config.CheckIntRange("ASN_BREAK_THRESHOLD", config.GetInt("ASN_BREAK_THRESHOLD", breakThreshold), 1, breakThreshold)
+	config.CheckDurationRange("ASN_BREAK_WINDOW_MS", config.GetDurationMs("ASN_BREAK_WINDOW_MS", breakWindow), breakWindow, time.Hour)
+	config.CheckDurationRange("ASN_BACKOFF_BASE_MS", config.GetDurationMs("ASN_BACKOFF_BASE_MS", breakBase), breakBase, time.Hour)
+	backoffBase := config.GetDurationMs("ASN_BACKOFF_BASE_MS", breakBase)
+	config.CheckDurationRange("ASN_BACKOFF_CAP_MS", config.GetDurationMs("ASN_BACKOFF_CAP_MS", breakCap), backoffBase, 24*time.Hour)
+	config.CheckIntRange("RECRAWL_DAYS", config.GetInt("RECRAWL_DAYS", minRecrawlDays), minRecrawlDays, 3650)
+
+	// Booleans: strict parse — garbage fatals instead of silently becoming false.
+	config.GetBool("CRAWLER_TLS_INSECURE", false)
+	config.GetBool("EMIT_DOMAINS", true)
+	config.GetBool("LOOP", false)
+	config.GetBool("PIPELINE", false)
+	config.GetBool("USE_CRAWL_STATE", false)
+	config.GetBool("FRONTIER_SNAPSHOT", true)
+	config.GetBool("VERBOSE", false)
+
+	// FRONTIER_SAMPLE_PCT: float in (0, 100].
+	if raw := strings.TrimSpace(os.Getenv("FRONTIER_SAMPLE_PCT")); raw != "" {
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil || v <= 0 || v > 100 {
+			log.Fatalf("invalid FRONTIER_SAMPLE_PCT=%q: must be a number in (0, 100]", raw)
+		}
+	}
+}
 
 // DNS over TCP to public resolvers (avoids system-resolver saturation).
 var resolver = &net.Resolver{
@@ -602,6 +661,7 @@ func isBlacklisted(domain string, info *WebsiteInfo) (string, bool) {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 

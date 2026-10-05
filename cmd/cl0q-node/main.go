@@ -42,6 +42,7 @@ import (
 	_ "github.com/lib/pq"
 
 	"cl0q/botid"
+	"cl0q/internal/config"
 )
 
 func env(k, def string) string {
@@ -114,12 +115,30 @@ func checkIngestURL(raw string, allowHTTP bool) (string, error) {
 	return u.String(), nil
 }
 
+// validateConfig checks every knob at startup (NR2). A bad value is a FATAL
+// error with a clear message — never a silent clamp. Call this FIRST in
+// main, after flag.Parse.
+func validateConfig() {
+	// Polite default: cap the heap at 2GiB. An explicit GOMEMLIMIT env wins.
+	config.SetMemoryLimitDefault(2 << 30)
+
+	// The ingest accepts at most 2000 rows per request; more is rejected
+	// server-side, fewer than 1 is nonsense.
+	config.CheckIntRange("batch", *batch, 1, maxBatch)
+	config.CheckDurationRange("interval", *interval, time.Second, time.Hour)
+	// CL0Q_NODE_ALLOW_HTTP is strict-parsed so a typo can't silently
+	// downgrade the token to cleartext http.
+	if raw := os.Getenv("CL0Q_NODE_ALLOW_HTTP"); raw != "" && raw != "0" && raw != "1" {
+		log.Fatalf("invalid CL0Q_NODE_ALLOW_HTTP=%q: must be 0 or 1", raw)
+	}
+}
+
 func main() {
 	flag.Parse()
+	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	userAgent = botid.MustUserAgent()
-	*batch = min(max(*batch, 1), maxBatch)
 	localDSN := env("LOCAL_DATABASE_URL", env("DATABASE_URL", ""))
 	token := env("NODE_TOKEN", "")
 	if localDSN == "" || (!*dryRun && (env("INGEST_URL", "") == "" || token == "")) {

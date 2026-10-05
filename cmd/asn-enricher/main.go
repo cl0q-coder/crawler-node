@@ -33,7 +33,29 @@ import (
 	"github.com/lib/pq"
 
 	"cl0q/dbresil"
+	"cl0q/internal/config"
 )
+
+// validateConfig checks every knob at startup (NR2). A bad value is a FATAL
+// error with a clear message — never a silent clamp or silent default.
+// Call this FIRST in main.
+func validateConfig() {
+	// Polite default: cap the heap at 2GiB. An explicit GOMEMLIMIT env wins.
+	config.SetMemoryLimitDefault(2 << 30)
+
+	config.CheckIntRange("ASN_MAXCONNS", config.GetInt("ASN_MAXCONNS", 5), 1, 50)
+	config.CheckIntRange("ASN_BATCH", config.GetInt("ASN_BATCH", 1000), 1, 10000)
+	config.CheckDurationRange("ASN_IDLE_SEC", time.Duration(config.GetInt("ASN_IDLE_SEC", 60))*time.Second, 0, time.Hour)
+	config.CheckDurationRange("ASN_IDLE_MAX_SEC", time.Duration(config.GetInt("ASN_IDLE_MAX_SEC", 1800))*time.Second, time.Second, 24*time.Hour)
+	config.CheckDurationRange("ASN_RATELIMIT_BACKOFF_SEC", time.Duration(config.GetInt("ASN_RATELIMIT_BACKOFF_SEC", 300))*time.Second, time.Second, time.Hour)
+	config.CheckIntRange("ASN_LIMIT", config.GetInt("ASN_LIMIT", 0), 0, 1000000)
+	config.CheckIntRange("ASN_CONCURRENCY", config.GetInt("ASN_CONCURRENCY", 16), 1, 16)
+	config.CheckIntRange("ASN_RPS", config.GetInt("ASN_RPS", 15), 1, 50)
+	// LOOP is strict-parsed so a typo can't silently change run mode.
+	if raw := os.Getenv("LOOP"); raw != "" && raw != "0" && raw != "1" {
+		log.Fatalf("invalid LOOP=%q: must be 0 or 1", raw)
+	}
+}
 
 // LiteResponse matches the ipinfo LITE API (https://api.ipinfo.io/lite/<ip>):
 // ASN + country + continent. (The free Lite tier has no city/region/org precision —
@@ -51,6 +73,7 @@ type LiteResponse struct {
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
 	log.Println("Starting asn-enricher (domain_info primary-IP enrichment)")

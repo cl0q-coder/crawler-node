@@ -16,7 +16,10 @@ import (
 	"os"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
+
+	"cl0q/botid"
 )
 
 // ValidateIntRange reports whether v is inside [lo, hi].
@@ -129,4 +132,52 @@ func SetMemoryLimitDefault(n int64) {
 		return
 	}
 	debug.SetMemoryLimit(n)
+}
+
+// nodeIDPrefixLen is how many leading chars of the node id go into the
+// public User-Agent (PROTOCOL.md §4). The full node id never appears in a
+// User-Agent: node_id + refresh_secret authenticates token rotation, so the
+// id is credential-adjacent and must not leak to site operators via their
+// access logs. A harvested 8-char prefix is useless for rotation.
+const nodeIDPrefixLen = 8
+
+// PublicUserAgent returns the crawl User-Agent for the node named by
+// CL0Q_NODE_ID, carrying only the leading nodeIDPrefixLen chars of the id.
+// It fatals when CL0Q_NODE_ID is unset or malformed — a node must never
+// crawl anonymously or with a forged identity.
+func PublicUserAgent() string {
+	ua, err := PublicUserAgentFor(nodeIDFromEnv())
+	if err != nil {
+		log.Fatal(err)
+	}
+	return ua
+}
+
+// PublicUserAgentFor builds the public User-Agent for the given node id,
+// truncated to the public prefix. Pure and unit-tested; PublicUserAgent
+// adds the env lookup and the fatal-on-missing behavior.
+func PublicUserAgentFor(nodeID string) (string, error) {
+	if nodeID == "" {
+		return "", fmt.Errorf("empty node id")
+	}
+	prefix := nodeID
+	if len(prefix) > nodeIDPrefixLen {
+		prefix = prefix[:nodeIDPrefixLen]
+	}
+	ua, err := botid.UserAgent(prefix)
+	if err != nil {
+		return "", err
+	}
+	return ua, nil
+}
+
+// nodeIDFromEnv returns CL0Q_NODE_ID or fatals with the same message the
+// binaries historically got from botid.MustUserAgent.
+func nodeIDFromEnv() string {
+	id := strings.TrimSpace(os.Getenv(botid.EnvNodeID))
+	if id == "" {
+		log.Fatalf("%s is not set. Every request a node makes names its operator; use the node id you were given "+
+			"when you enrolled (see docs/CRAWLER_NODES.md).", botid.EnvNodeID)
+	}
+	return id
 }

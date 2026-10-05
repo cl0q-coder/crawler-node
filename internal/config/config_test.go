@@ -71,3 +71,37 @@ func TestPolitenessFloorsCannotBeLowered(t *testing.T) {
 		}
 	}
 }
+
+func TestPublicUserAgentForTruncatesToPrefix(t *testing.T) {
+	// A long node id is truncated to its first 8 chars in the UA —
+	// the full id must not leak to site operators (PROTOCOL.md §4).
+	ua, err := PublicUserAgentFor("nd-7f3a9c2b4d1e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ua, "operator=nd-7f3a9") {
+		t.Errorf("UA should carry the 8-char prefix, got %q", ua)
+	}
+	if strings.Contains(ua, "nd-7f3a9c2b4d1e") {
+		t.Errorf("UA must not contain the full node id, got %q", ua)
+	}
+}
+
+func TestPublicUserAgentForShortIDUnchanged(t *testing.T) {
+	// An id at or under 8 chars is used as-is (still a valid botid).
+	ua, err := PublicUserAgentFor("nd-1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(ua, "operator=nd-1234") {
+		t.Errorf("short id should be unchanged, got %q", ua)
+	}
+}
+
+func TestPublicUserAgentForRejectsBadInput(t *testing.T) {
+	for _, bad := range []string{"", "x", "ND-UPPER", "nd_under", "nd with space"} {
+		if _, err := PublicUserAgentFor(bad); err == nil {
+			t.Errorf("PublicUserAgentFor(%q) should fail", bad)
+		}
+	}
+}

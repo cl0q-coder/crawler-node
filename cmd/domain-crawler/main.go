@@ -51,7 +51,6 @@ import (
 	"github.com/lib/pq"
 	"golang.org/x/net/html"
 
-	"cl0q/botid"
 	"cl0q/crawlutil"
 	"cl0q/dbresil"
 	"cl0q/internal/config"
@@ -326,7 +325,7 @@ func main() {
 	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
-	userAgent = botid.MustUserAgent()
+	userAgent = config.PublicUserAgent() // truncated operator prefix, PROTOCOL.md §4
 	// Politeness floors: a setting can only make the crawler gentler.
 	// (validateConfig already rejected anything below the floors; the
 	// max/min calls below are defense-in-depth.)

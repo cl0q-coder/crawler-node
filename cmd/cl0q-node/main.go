@@ -162,7 +162,7 @@ func main() {
 	if os.Getenv(botid.EnvNodeID) == "" && credNodeID != "" {
 		os.Setenv(botid.EnvNodeID, credNodeID)
 	}
-	userAgent = botid.MustUserAgent()
+	userAgent = config.PublicUserAgent() // truncated operator prefix, PROTOCOL.md §4
 	localDSN := env("LOCAL_DATABASE_URL", env("DATABASE_URL", ""))
 	token := env("NODE_TOKEN", "")
 	if token == "" {

@@ -85,6 +85,7 @@ import (
 	"cl0q/dbresil"
 	"cl0q/internal/config"
 	"cl0q/internal/footprint"
+	"cl0q/internal/metrics"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -192,6 +193,11 @@ func ipThrottle(ip string) { throttle(&ipGates, ip, ipDelay) }
 // userAgent comes from botid: the good-bot form "Mozilla/5.0 (compatible; cl0q-node/1.0; operator=<id>; +<url>)".
 // It never forges a real browser build — that trips WAF "client inconsistency" rules and reads as a deceptive bot.
 var fpChecker *footprint.Checker // NR3: nil until main() opens the DB
+
+// NR6: observability. Initialized in main(); nil in tests that don't call it.
+var mreg *metrics.Registry
+var mCrawledOK, mCrawledFailed, mCrawledSkipped, mCrawledChallenged, mCrawledUnchanged, mCrawledDeferred, mCrawledBlocked *atomic.Int64
+var mBreakerOpen *atomic.Int64
 
 var (
 	dialSem         chan struct{}
@@ -474,6 +480,7 @@ func (b *asnBreaker) fail(key string) {
 		s.openUntil = now.Add(cd)
 		s.fails, s.winStart = 0, time.Time{}
 		log.Printf("asn-backoff: OPEN %s for %s (level %d)", key, cd, s.level)
+		minc(mBreakerOpen)
 	}
 }
 
@@ -739,6 +746,40 @@ func main() {
 	// well clear of the shared 100-conn budget (was workers+16 = 48).
 	db.SetMaxOpenConns(dbConns)
 	fpChecker = footprint.New(db) // NR3: bounded footprint
+	// NR6: observability.
+	mreg = metrics.NewRegistry()
+	mCrawledOK = mreg.Counter("crawler_pages_ok_total", "pages successfully crawled")
+	mCrawledFailed = mreg.Counter("crawler_pages_failed_total", "pages where the fetch failed")
+	mCrawledSkipped = mreg.Counter("crawler_pages_skipped_total", "pages skipped (robots, blacklist note)")
+	mCrawledChallenged = mreg.Counter("crawler_pages_challenged_total", "pages behind a bot challenge")
+	mCrawledUnchanged = mreg.Counter("crawler_pages_unchanged_total", "pages unchanged (304)")
+	mCrawledDeferred = mreg.Counter("crawler_pages_deferred_total", "pages deferred by ASN/IP backoff")
+	mCrawledBlocked = mreg.Counter("crawler_pages_blocked_total", "pages blocked by blacklist")
+	mBreakerOpen = mreg.Counter("crawler_breaker_opens_total", "times the ASN/IP breaker opened a cooldown")
+	mreg.GaugeFunc("crawler_frontier_depth", "uncrawled domains in domain_info", func() int64 {
+		var n int64
+		_ = db.QueryRow(`SELECT count(*) FROM domain_info WHERE web_crawled_at IS NULL`).Scan(&n)
+		return n
+	})
+	mreg.GaugeFunc("crawler_db_domains", "rows in domain_info", func() int64 {
+		var n int64
+		_ = db.QueryRow(`SELECT count(*) FROM domain_info`).Scan(&n)
+		return n
+	})
+	mreg.GaugeFunc("crawler_db_pages", "rows in website_info", func() int64 {
+		var n int64
+		_ = db.QueryRow(`SELECT count(*) FROM website_info`).Scan(&n)
+		return n
+	})
+	mreg.GaugeFunc("crawler_breaker_open_groups", "groups currently in breaker cooldown", func() int64 {
+		var n int64
+		breaker.m.Range(func(_, _ any) bool { n++; return true })
+		return n
+	})
+	if addr := os.Getenv("METRICS_ADDR"); addr != "" {
+		mreg.Serve(addr)
+		log.Printf("metrics: serving /metrics and /status on %s", addr)
+	}
 	db.SetMaxIdleConns(min(4, dbConns))
 	db.SetConnMaxLifetime(5 * time.Minute)
 	if dbresil.WaitForRemoteCtx(ctx, db) != nil { // wait out a database outage at startup instead of crash-looping
@@ -1246,6 +1287,7 @@ func crawlBatch(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, targets
 	for r := range results {
 		if r.deferred {
 			deferred++
+			minc(mCrawledDeferred)
 			if verbose {
 				log.Printf("  · %-32s deferred (asn/ip backoff)", r.domain)
 			}
@@ -1255,32 +1297,38 @@ func crawlBatch(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, targets
 		switch oc {
 		case outSkipped:
 			skipped++
+			minc(mCrawledSkipped)
 			if verbose {
 				log.Printf("  · %-32s skip (%s)", r.domain, r.note)
 			}
 		case outFailed:
 			failed++
+			minc(mCrawledFailed)
 			if verbose {
 				log.Printf("  · %-32s ERROR %v", r.domain, r.err)
 			}
 		case outUnchanged:
 			unchanged++
+			minc(mCrawledUnchanged)
 			if verbose {
 				log.Printf("  · %-32s 304  unchanged (%5dms)", r.domain, out.info.LatencyMs)
 			}
 		case outChallenged:
 			challenged++
+			minc(mCrawledChallenged)
 			if verbose {
 				log.Printf("  · %-32s %3d  CHALLENGE (%s)", r.domain, out.info.StatusCode, out.info.Challenge)
 			}
 		default:
 			done++
+			minc(mCrawledOK)
 			if verbose {
 				log.Printf("  · %-32s %3d  %5dms  %q", r.domain, out.info.StatusCode, out.info.LatencyMs, clip(out.info.Title, 50))
 			}
 		}
 		if out.bad {
 			blocked++
+			minc(mCrawledBlocked)
 			if verbose {
 				log.Printf("  · %-32s BLOCKED (matched %q)", r.domain, term)
 			}
@@ -1595,6 +1643,13 @@ func flushBatch(remote *sql.DB, spool *dbresil.Spooler, batch []crawlOut, upsert
 	}
 	log.Printf("batch flush failed (%v) — falling back to row-by-row for %d row(s)", err, len(batch))
 	return flushRowByRow(batch, upsert, delStmt, stampStmt, emitStmt, touchStmt)
+}
+
+// minc safely increments a metrics counter (nil when metrics aren't initialized).
+func minc(c *atomic.Int64) {
+	if c != nil {
+		c.Add(1)
+	}
 }
 
 // filterExistingDomains keeps only batch entries whose domain is already in

@@ -45,6 +45,19 @@ func (ts *tokenSource) get() string {
 	return ts.token
 }
 
+// authState returns 0=ok, 1=auth failing (backing off), 2=token revoked/wiped (NR6).
+func (ts *tokenSource) authState() int64 {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.token == "" {
+		return 2
+	}
+	if ts.authFails > 0 {
+		return 1
+	}
+	return 0
+}
+
 // authBackoff reports how long the main loop should wait before the next
 // cycle after auth failures. Zero means "use the normal interval".
 func (ts *tokenSource) authBackoff() time.Duration {

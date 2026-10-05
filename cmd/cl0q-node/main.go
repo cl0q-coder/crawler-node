@@ -43,6 +43,7 @@ import (
 
 	"cl0q/botid"
 	"cl0q/internal/config"
+	"cl0q/internal/metrics"
 )
 
 func env(k, def string) string {
@@ -195,10 +196,69 @@ func main() {
 	}
 	ts := &tokenSource{token: token, nodeID: os.Getenv(botid.EnvNodeID), credPath: credPath, ingestURL: ingestURL}
 	newSender := func(tok string) sender { return httpSender(newIngestClient(), ingestURL, tok) }
+	// NR6: observability.
+	nmreg := metrics.NewRegistry()
+	nmForwarded := nmreg.Counter("node_rows_forwarded_total", "rows successfully sent to the ingest")
+	nmFailed := nmreg.Counter("node_ingest_failures_total", "ingest POST failures (retried)")
+	nmDeadLettered := nmreg.Counter("node_rows_deadlettered_total", "rows dead-lettered after permanent rejection")
+	nmAuthState := nmreg.Gauge("node_auth_state", "0=ok, 1=auth failing (backoff), 2=token revoked")
+	nmreg.GaugeFunc("node_watermark_lag_website", "unforwarded rows in website_info", func() int64 {
+		return watermarkLag(db, "website_info")
+	})
+	nmreg.GaugeFunc("node_watermark_lag_domain", "unforwarded rows in domain_info", func() int64 {
+		return watermarkLag(db, "domain_info")
+	})
+	nmreg.GaugeFunc("node_db_bytes", "local database size in bytes", func() int64 {
+		var n int64
+		_ = db.QueryRow(`SELECT pg_database_size(current_database())`).Scan(&n)
+		return n
+	})
+	if addr := os.Getenv("METRICS_ADDR"); addr != "" {
+		nmreg.Serve(addr)
+		log.Printf("metrics: serving /metrics and /status on %s", addr)
+	}
 	send := authSender(ts, newSender)
+	// NR6: count forward outcomes.
+	countedSend := func(path string, rows any) error {
+		err := send(path, rows)
+		if err == nil {
+			switch v := rows.(type) {
+			case []wiRow:
+				nmForwarded.Add(int64(len(v)))
+			case []diRow:
+				nmForwarded.Add(int64(len(v)))
+			}
+		} else {
+			nmFailed.Add(1)
+			if _, dead := permanent(err); dead {
+				// The batch was dead-lettered (forward moves it there on
+				// permanent rejection); count the rows.
+				switch v := rows.(type) {
+				case []wiRow:
+					nmDeadLettered.Add(int64(len(v)))
+				case []diRow:
+					nmDeadLettered.Add(int64(len(v)))
+				}
+			}
+		}
+		return err
+	}
+	// NR6: reflect auth state in the gauge.
+	go func() {
+		t := time.NewTicker(30 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				nmAuthState.Store(ts.authState())
+			}
+		}
+	}()
 	for {
-		wi := forward(ctx, st, send, "website_info", "/api/ingest/website", *batch, *dryRun)
-		di := forward(ctx, st, send, "domain_info", "/api/ingest/domains", *batch, *dryRun)
+		wi := forward(ctx, st, countedSend, "website_info", "/api/ingest/website", *batch, *dryRun)
+		di := forward(ctx, st, countedSend, "domain_info", "/api/ingest/domains", *batch, *dryRun)
 		log.Printf("cycle done: website_info forwarded=%d, domain_info forwarded=%d", wi, di)
 		if *once {
 			return
@@ -216,6 +276,22 @@ func main() {
 			return
 		}
 	}
+}
+
+// watermarkLag returns how many rows are waiting to be forwarded (NR6).
+func watermarkLag(db *sql.DB, table string) int64 {
+	var mark int64
+	_ = db.QueryRow(`SELECT last_id FROM cl0q_node_state WHERE name=$1`, table).Scan(&mark)
+	var maxID int64
+	q := `SELECT COALESCE(MAX(id), 0) FROM website_info`
+	if table == "domain_info" {
+		q = `SELECT COALESCE(MAX(id), 0) FROM domain_info`
+	}
+	_ = db.QueryRow(q).Scan(&maxID)
+	if maxID < mark {
+		return 0
+	}
+	return maxID - mark
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) bool {

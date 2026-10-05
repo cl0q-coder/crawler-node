@@ -186,12 +186,30 @@ func main() {
 	}
 
 	st := pgStore{db}
-	send := httpSender(newIngestClient(), ingestURL, token)
+	// NR5: the token lives in a mutable holder so rotation doesn't need a
+	// restart. Auto-rotation is only possible when the token came from the
+	// credential file (an env token can't be rotated in place).
+	credPath := ""
+	if env("NODE_TOKEN", "") == "" && credToken != "" {
+		credPath = credentialsPath()
+	}
+	ts := &tokenSource{token: token, nodeID: os.Getenv(botid.EnvNodeID), credPath: credPath, ingestURL: ingestURL}
+	newSender := func(tok string) sender { return httpSender(newIngestClient(), ingestURL, tok) }
+	send := authSender(ts, newSender)
 	for {
 		wi := forward(ctx, st, send, "website_info", "/api/ingest/website", *batch, *dryRun)
 		di := forward(ctx, st, send, "domain_info", "/api/ingest/domains", *batch, *dryRun)
 		log.Printf("cycle done: website_info forwarded=%d, domain_info forwarded=%d", wi, di)
-		if *once || !sleepCtx(ctx, *interval) {
+		if *once {
+			return
+		}
+		// NR5: after auth failures, back off longer than the normal interval
+		// instead of spinning on a dead token.
+		wait := *interval
+		if ab := ts.authBackoff(); ab > wait {
+			wait = ab
+		}
+		if !sleepCtx(ctx, wait) {
 			if ctx.Err() != nil {
 				log.Printf("stopped: shutdown signal received")
 			}

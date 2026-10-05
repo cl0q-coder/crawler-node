@@ -1,8 +1,12 @@
 # cl0q crawler node: a local Postgres, the crawl pipeline, and cl0q-node, which sends the results to cl0q.
 #
 #   cp .env.example .env     # set CL0Q_NODE_ID, NODE_TOKEN and DB_PASSWORD (IPINFO_TOKEN optional)
+#   docker compose run --rm preflight   # self-check: DB, ingest+token, DNS, egress, netguard, robots
 #   docker compose up -d --build
 #   docker compose logs -f website-crawler node
+#
+# Debug a single URL through the real pipeline without writing anything:
+#   docker compose run --rm -e SINGLE_URL=https://example.com website-crawler
 #
 # Nothing listens on a public port. Every request the crawlers make carries
 #   Mozilla/5.0 (compatible; cl0q-node/1.0; operator=<CL0Q_NODE_ID>; +https://cl0q.com/bot)
@@ -91,5 +95,18 @@ services:
       INGEST_URL: "${INGEST_URL:-https://cl0q.com}"
       NODE_TOKEN: "${NODE_TOKEN:?set NODE_TOKEN in .env (shown once when your node was enrolled)}"
 
+
+  # One-shot self-check (NR4): DB, ingest+token, DNS, egress, netguard, robots.
+  # Not started by `up` (profiles); run it explicitly before going live:
+  #   docker compose run --rm preflight
+  preflight:
+    <<: *svc
+    profiles: ["tools"]
+    restart: "no"
+    command: ["/usr/local/bin/preflight"]
+    environment:
+      LOCAL_DATABASE_URL: *db_url
+      INGEST_URL: "${INGEST_URL:-https://cl0q.com}"
+      NODE_TOKEN: "${NODE_TOKEN:?set NODE_TOKEN in .env}"
 volumes:
   pgdata: {}

@@ -50,6 +50,7 @@ import (
 	"context"
 	"crypto/tls"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -664,6 +665,27 @@ func main() {
 	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
+
+	// NR4: single-URL dry-run. Crawls one URL through the real pipeline
+	// (robots -> fetch -> parse) and prints exactly what cl0q-node would
+	// send for it, writing nothing — no DB needed. The operator's fastest
+	// debug loop: SINGLE_URL=https://example.com website-crawler
+	if rawURL := strings.TrimSpace(os.Getenv("SINGLE_URL")); rawURL != "" {
+		if os.Getenv("CL0Q_NODE_ID") == "" {
+			log.Println("warning: CL0Q_NODE_ID not set (dry-run only; set it before crawling for real)")
+		}
+		info, host, err := fetchOneURLInfo(ctx, rawURL)
+		if err != nil {
+			log.Fatalf("single-url: %v", err)
+		}
+		out, err := json.MarshalIndent(dryRunEnvelope(host, info), "", "  ")
+		if err != nil {
+			log.Fatalf("single-url: marshal: %v", err)
+		}
+		fmt.Println(string(out))
+		fmt.Println("\ndry-run: nothing written, nothing sent")
+		return
+	}
 
 	dsn := envStr("DATABASE_URL", "postgres://cl0q:cl0q@localhost:5432/cl0q?sslmode=disable")
 	// Throughput settings are clamped too: a typo (0, negative, huge) must not stall or flood the crawler. Pacing, not
@@ -1946,29 +1968,45 @@ var errRobotsDisallowed = errors.New("robots.txt disallows /")
 // this entrypoint skips those so tests can drive the pipeline against fake
 // origins directly.
 func crawlOneURL(ctx context.Context, db *sql.DB, rawURL string) (*WebsiteInfo, error) {
+	info, host, err := fetchOneURLInfo(ctx, rawURL)
+	if err != nil {
+		return nil, err
+	}
+	batch := []crawlOut{{domain: host, info: *info}}
+	if _, err := flushBatchTx(ctx, db, batch, false, false); err != nil {
+		return nil, fmt.Errorf("persist: %w", err)
+	}
+	return info, nil
+}
+
+// fetchOneURLInfo runs one URL through the real pipeline — robots check,
+// fetch, parse — but writes nothing. It returns the fetched info and the
+// host. Used by crawlOneURL (which then persists) and by -single-url
+// dry-run mode (which prints the envelope instead).
+func fetchOneURLInfo(ctx context.Context, rawURL string) (*WebsiteInfo, string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return nil, fmt.Errorf("parse url: %w", err)
+		return nil, "", fmt.Errorf("parse url: %w", err)
 	}
 	host := u.Host
 	if host == "" {
-		return nil, fmt.Errorf("url %q has no host", rawURL)
+		return nil, "", fmt.Errorf("url %q has no host", rawURL)
 	}
 	ri := robotsFor(host, "")
 	if ri.blockErr != nil {
-		return nil, ri.blockErr
+		return nil, "", ri.blockErr
 	}
 	if !ri.allowed {
-		return nil, errRobotsDisallowed
+		return nil, "", errRobotsDisallowed
 	}
 	throttleBudget := throttleRetries
 	for {
 		info, err := fetchWebsiteInfo(ctx, host, "", "", "", ri.rules)
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if info == nil {
-			return nil, fmt.Errorf("fetchWebsiteInfo returned nil info, nil error")
+			return nil, "", fmt.Errorf("fetchWebsiteInfo returned nil info, nil error")
 		}
 		if retryThrottled(info, throttleBudget) {
 			throttleBudget--
@@ -1978,16 +2016,48 @@ func crawlOneURL(ctx context.Context, db *sql.DB, rawURL string) (*WebsiteInfo, 
 			}
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, "", ctx.Err()
 			case <-time.After(wait):
 			}
 			continue
 		}
-		batch := []crawlOut{{domain: host, info: *info}}
-		if _, err := flushBatchTx(ctx, db, batch, false, false); err != nil {
-			return nil, fmt.Errorf("persist: %w", err)
-		}
-		return info, nil
+		return info, host, nil
+	}
+}
+
+// dryRunEnvelope renders a WebsiteInfo as the JSON row cl0q-node would send
+// to the ingest API (same field names as wiRow), so -single-url prints
+// exactly what a real crawl of the URL would submit.
+func dryRunEnvelope(host string, info *WebsiteInfo) map[string]any {
+	fetchErr := ""
+	if info.Challenge != "" {
+		fetchErr = "challenge:" + info.Challenge
+	}
+	return map[string]any{
+		"domain":         host,
+		"title":          info.Title,
+		"description":    info.Description,
+		"keywords":       info.Keywords,
+		"canonical":      info.Canonical,
+		"h1":             info.H1,
+		"status_code":    info.StatusCode,
+		"content_type":   info.ContentType,
+		"content_length": info.ContentLength,
+		"latency_ms":     info.LatencyMs,
+		"redirects":      info.RedirectCount,
+		"outbound_links": info.OutboundLinkCount,
+		"image_count":    info.ImageCount,
+		"word_count":     info.WordCount,
+		"charset":        info.Charset,
+		"robots":         info.Robots,
+		"og_title":       info.OGTitle,
+		"og_image":       info.OGImage,
+		"twitter_card":   info.TwitterCard,
+		"page_language":  info.PageLanguage,
+		"server_header":  info.ServerHeader,
+		"fetch_error":    fetchErr,
+		"etag":           info.ETag,
+		"last_modified":  info.LastModified,
 	}
 }
 

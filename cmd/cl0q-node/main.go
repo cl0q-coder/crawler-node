@@ -134,13 +134,30 @@ func validateConfig() {
 }
 
 func main() {
+	// Subcommand before flag parsing: `cl0q-node enroll` (PROTOCOL.md §1).
+	if len(os.Args) > 1 && os.Args[1] == "enroll" {
+		runEnrollCommand(os.Args[2:])
+		return
+	}
 	flag.Parse()
 	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	defer stop()
+	// Credentials: NODE_TOKEN/CL0Q_NODE_ID env win; otherwise the enrol
+	// credential file (written by `cl0q-node enroll`, mode 0600).
+	credNodeID, credToken, err := loadCredentials()
+	if err != nil {
+		log.Fatal(err)
+	}
+	if os.Getenv(botid.EnvNodeID) == "" && credNodeID != "" {
+		os.Setenv(botid.EnvNodeID, credNodeID)
+	}
 	userAgent = botid.MustUserAgent()
 	localDSN := env("LOCAL_DATABASE_URL", env("DATABASE_URL", ""))
 	token := env("NODE_TOKEN", "")
+	if token == "" {
+		token = credToken
+	}
 	if localDSN == "" || (!*dryRun && (env("INGEST_URL", "") == "" || token == "")) {
 		log.Fatal("need LOCAL_DATABASE_URL, and INGEST_URL + NODE_TOKEN (unless -dry-run)")
 	}

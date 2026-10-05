@@ -154,10 +154,11 @@ func main() {
 	defer stop()
 	// Credentials: NODE_TOKEN/CL0Q_NODE_ID env win; otherwise the enrol
 	// credential file (written by `cl0q-node enroll`, mode 0600).
-	credNodeID, credToken, err := loadCredentials()
+	creds, err := loadCredentials()
 	if err != nil {
 		log.Fatal(err)
 	}
+	credNodeID, credToken := creds.NodeID, creds.Token
 	if os.Getenv(botid.EnvNodeID) == "" && credNodeID != "" {
 		os.Setenv(botid.EnvNodeID, credNodeID)
 	}
@@ -202,7 +203,7 @@ func main() {
 	if env("NODE_TOKEN", "") == "" && credToken != "" {
 		credPath = credentialsPath()
 	}
-	ts := &tokenSource{token: token, nodeID: os.Getenv(botid.EnvNodeID), credPath: credPath, ingestURL: ingestURL}
+	ts := &tokenSource{token: token, refreshSecret: creds.RefreshSecret, nodeID: os.Getenv(botid.EnvNodeID), credPath: credPath, ingestURL: ingestURL}
 	newSender := func(tok string) sender { return httpSender(newIngestClient(), ingestURL, tok) }
 	// NR6: observability.
 	nmreg := metrics.NewRegistry()

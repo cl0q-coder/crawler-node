@@ -3,9 +3,11 @@
 //	Usage: cl0q-node enroll [--contact you@example.com] [--out path]
 //
 // POSTs to {INGEST_URL}/api/nodes/enroll, stores the returned node_id +
-// token as JSON at the credentials path with mode 0600, and prints the
-// node id (never the token). If a credentials file already exists, its
-// node_id is sent along, making re-enrol an idempotent rotation.
+// token + refresh_secret as JSON at the credentials path with mode 0600,
+// and prints the node id (never the token or refresh_secret). If a
+// credentials file already exists, its node_id + refresh_secret are sent
+// along, making re-enrol an authenticated idempotent rotation
+// (PROTOCOL.md §1: the node_id alone must never authorize rotation).
 package main
 
 import (
@@ -25,20 +27,25 @@ import (
 type enrollRequest struct {
 	Version         string `json:"version"`
 	OperatorContact string `json:"operator_contact,omitempty"`
-	NodeID          string `json:"node_id,omitempty"` // set on re-enrol (rotation)
+	NodeID          string `json:"node_id,omitempty"`        // set on re-enrol (rotation)
+	RefreshSecret   string `json:"refresh_secret,omitempty"` // required with NodeID on re-enrol
 }
 
 type enrollResponse struct {
-	NodeID      string `json:"node_id"`
-	Token       string `json:"token"`
-	IngestURL   string `json:"ingest_url"`
-	Quarantined bool   `json:"quarantined"`
+	NodeID        string `json:"node_id"`
+	Token         string `json:"token"`
+	RefreshSecret string `json:"refresh_secret"`
+	IngestURL     string `json:"ingest_url"`
+	Quarantined   bool   `json:"quarantined"`
 }
 
-// nodeCredentials is what lives in the credentials file (0600).
+// nodeCredentials is what lives in the credentials file (0600). The
+// refresh_secret authenticates rotation: it is stored like the token
+// (never logged, never printed, never in a User-Agent).
 type nodeCredentials struct {
-	NodeID string `json:"node_id"`
-	Token  string `json:"token"`
+	NodeID        string `json:"node_id"`
+	Token         string `json:"token"`
+	RefreshSecret string `json:"refresh_secret,omitempty"`
 }
 
 // credentialsPath is where enrol stores node_id + token.
@@ -50,31 +57,35 @@ func credentialsPath() string {
 	return "cl0q-node.json"
 }
 
-// loadCredentials returns (node_id, token). Precedence: NODE_TOKEN /
+// loadCredentials returns the stored credentials. Precedence: NODE_TOKEN /
 // CL0Q_NODE_ID env, then the credentials file. Missing file is not an
-// error — it just means "not enrolled yet".
-func loadCredentials() (nodeID, token string, err error) {
-	if token = os.Getenv("NODE_TOKEN"); token != "" {
-		return os.Getenv(botid.EnvNodeID), token, nil
+// error — it just means "not enrolled yet". The env path carries no
+// refresh_secret (it was never stored there), so env credentials cannot
+// rotate.
+func loadCredentials() (nodeCredentials, error) {
+	var creds nodeCredentials
+	if token := os.Getenv("NODE_TOKEN"); token != "" {
+		creds.NodeID = os.Getenv(botid.EnvNodeID)
+		creds.Token = token
+		return creds, nil
 	}
 	data, err := os.ReadFile(credentialsPath())
 	if err != nil {
 		if os.IsNotExist(err) {
-			return "", "", nil
+			return creds, nil
 		}
-		return "", "", fmt.Errorf("read credentials %s: %w", credentialsPath(), err)
+		return creds, fmt.Errorf("read credentials %s: %w", credentialsPath(), err)
 	}
-	var creds nodeCredentials
 	if err := json.Unmarshal(data, &creds); err != nil {
-		return "", "", fmt.Errorf("parse credentials %s: %w", credentialsPath(), err)
+		return creds, fmt.Errorf("parse credentials %s: %w", credentialsPath(), err)
 	}
-	return creds.NodeID, creds.Token, nil
+	return creds, nil
 }
 
-// writeCredentials stores node_id + token as JSON with mode 0600.
+// writeCredentials stores the credentials as JSON with mode 0600.
 // The file must not exist with wider permissions afterwards.
-func writeCredentials(path, nodeID, token string) error {
-	data, err := json.MarshalIndent(nodeCredentials{NodeID: nodeID, Token: token}, "", "  ")
+func writeCredentials(path string, creds nodeCredentials) error {
+	data, err := json.MarshalIndent(creds, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -121,21 +132,26 @@ func runEnrollCommand(args []string) {
 }
 
 // doEnroll performs the enrol handshake and stores the credentials.
-// The token is never printed or logged. Returns nil on success.
+// The token and refresh_secret are never printed or logged. Returns nil
+// on success.
 func doEnroll(ingestURL, contact, out string) error {
-	// Re-enrol (rotation) if we already have credentials: send the node_id.
-	var reNodeID string
+	// Re-enrol (rotation) if we already have credentials: send node_id +
+	// refresh_secret. A credential file from before refresh_secret existed
+	// cannot authenticate rotation — fall back to a fresh enrol rather
+	// than sending the node_id alone (PROTOCOL.md §1).
+	var reCreds nodeCredentials
 	if data, err := os.ReadFile(out); err == nil {
 		var creds nodeCredentials
-		if json.Unmarshal(data, &creds) == nil {
-			reNodeID = creds.NodeID
+		if json.Unmarshal(data, &creds) == nil && creds.RefreshSecret != "" {
+			reCreds = creds
 		}
 	}
 
 	reqBody, _ := json.Marshal(enrollRequest{
 		Version:         botid.Product + "/" + botid.Version,
 		OperatorContact: contact,
-		NodeID:          reNodeID,
+		NodeID:          reCreds.NodeID,
+		RefreshSecret:   reCreds.RefreshSecret,
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -162,13 +178,20 @@ func doEnroll(ingestURL, contact, out string) error {
 	if er.NodeID == "" || er.Token == "" {
 		return fmt.Errorf("server response missing node_id or token")
 	}
+	if er.RefreshSecret == "" {
+		return fmt.Errorf("server response missing refresh_secret (PROTOCOL.md §1)")
+	}
 	if _, err := botid.UserAgent(er.NodeID); err != nil {
 		return fmt.Errorf("server returned invalid node_id: %w", err)
 	}
-	if err := writeCredentials(out, er.NodeID, er.Token); err != nil {
+	if err := writeCredentials(out, nodeCredentials{
+		NodeID:        er.NodeID,
+		Token:         er.Token,
+		RefreshSecret: er.RefreshSecret,
+	}); err != nil {
 		return err
 	}
-	// The token is NEVER printed.
+	// The token and refresh_secret are NEVER printed.
 	quarantine := "quarantined (submissions are spot-verified before reaching the live index)"
 	if !er.Quarantined {
 		quarantine = "trusted"

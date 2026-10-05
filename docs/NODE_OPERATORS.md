@@ -69,6 +69,7 @@ could read it off a site's logs). Nodes running on plain `NODE_TOKEN` /
 `CL0Q_NODE_ID` environment variables can't rotate — there's no refresh
 secret stored there, so enrol into a credentials file first.
 
+
 ## 2. Configure
 
 ```sh

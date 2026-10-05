@@ -323,10 +323,11 @@ var resolver = &net.Resolver{
 	},
 }
 
-// baseDialer refuses non-public addresses at connect time (netguard.Control sees the resolved IP of every attempt,
-// so neither DNS nor a redirect can steer a request to a private or metadata address). No proxy is ever used, so the
-// check can't be bypassed through one either.
-var baseDialer = &net.Dialer{Timeout: 8 * time.Second, KeepAlive: 30 * time.Second, Resolver: resolver, Control: netguard.Control}
+// ipDialer dials already-resolved IP literals directly: with an IP address
+// there is nothing to resolve, so no Resolver is attached. DNS answers come
+// from dnsAnswers (cached); netguard.Control still guards every attempt, and
+// TLS SNI/verification plus the Host header keep using the URL host.
+var ipDialer = &net.Dialer{Timeout: 8 * time.Second, KeepAlive: 30 * time.Second, Control: netguard.Control}
 
 var transport = &http.Transport{
 	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -336,7 +337,7 @@ var transport = &http.Transport{
 			return nil, ctx.Err()
 		}
 		defer func() { <-dialSem }()
-		return baseDialer.DialContext(ctx, network, addr)
+		return dialCached(ctx, network, addr)
 	},
 	TLSClientConfig:       &tls.Config{InsecureSkipVerify: false}, // verify certs; opt out via CRAWLER_TLS_INSECURE=1 (see main)
 	MaxIdleConns:          512,
@@ -2180,17 +2181,25 @@ func retryThrottled(info *WebsiteInfo, budget int) bool {
 }
 
 // lookupIP resolves host to the address its requests are paced by: the first public IPv4, else the first public
-// IPv6, else (all-private) the first address, which crawlOne then refuses.
+// IPv6, else (all-private) the first address, which crawlOne then refuses. Answers come from the DNS cache.
 func lookupIP(host string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	addrs, err := resolver.LookupNetIP(ctx, "ip", host)
+	ipaddrs, err := dnsAnswers.lookupIPAddr(ctx, host)
 	if err != nil {
 		return "", fmt.Errorf("dns: %w", err)
 	}
 	var v6 netip.Addr
-	for _, a := range addrs {
+	var first netip.Addr
+	for _, ia := range ipaddrs {
+		a, ok := netip.AddrFromSlice(ia.IP)
+		if !ok {
+			continue
+		}
 		a = a.Unmap()
+		if !first.IsValid() {
+			first = a
+		}
 		if !netguard.Public(a) {
 			continue
 		}
@@ -2204,8 +2213,8 @@ func lookupIP(host string) (string, error) {
 	if v6.IsValid() {
 		return v6.String(), nil
 	}
-	if len(addrs) > 0 {
-		return addrs[0].Unmap().String(), nil
+	if first.IsValid() {
+		return first.String(), nil
 	}
 	return "", fmt.Errorf("dns: no address for %s", host)
 }

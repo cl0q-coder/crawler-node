@@ -21,9 +21,18 @@ func TestUserAgent(t *testing.T) {
 }
 
 func TestUserAgentRejectsBadIDs(t *testing.T) {
-	for _, id := range []string{"", "a", "Alice", "has space", "x;y", "a)b", "-lead", strings.Repeat("a", 33)} {
+	for _, id := range []string{"", "a", "Alice", "has space", "x;y", "a)b", "-lead", "_lead", strings.Repeat("a", 33)} {
 		if _, err := UserAgent(id); err == nil {
 			t.Errorf("node id %q should be rejected", id)
+		}
+	}
+}
+
+func TestUserAgentAcceptsServerIDs(t *testing.T) {
+	// The live server mints nd_-prefixed ids (see PROTOCOL.md); the client must accept them.
+	for _, id := range []string{"nd_d84cd67b", "nd_7f3a9c", "alice-01", "a_b-c1"} {
+		if _, err := UserAgent(id); err != nil {
+			t.Errorf("node id %q should be accepted: %v", id, err)
 		}
 	}
 }

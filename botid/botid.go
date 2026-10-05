@@ -29,12 +29,12 @@ const (
 	EnvNodeID = "CL0Q_NODE_ID"
 )
 
-var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,31}$`)
+var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,31}$`)
 
-// UserAgent builds the User-Agent for the given node id (2–32 chars of a-z, 0-9 and '-').
+// UserAgent builds the User-Agent for the given node id (2–32 chars of a-z, 0-9, '-' and '_').
 func UserAgent(nodeID string) (string, error) {
 	if !idRE.MatchString(nodeID) {
-		return "", fmt.Errorf("%s=%q is not a valid node id (2-32 chars: a-z, 0-9, '-')", EnvNodeID, nodeID)
+		return "", fmt.Errorf("%s=%q is not a valid node id (2-32 chars: a-z, 0-9, '-', '_')", EnvNodeID, nodeID)
 	}
 	return fmt.Sprintf("Mozilla/5.0 (compatible; %s/%s; operator=%s; +%s)", Product, Version, nodeID, InfoURL), nil
 }

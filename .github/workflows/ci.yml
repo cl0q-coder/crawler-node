@@ -94,11 +94,14 @@ jobs:
     runs-on: ubuntu-latest
     services:
       dind:
-        image: docker:dind
+        image: docker:27-dind
         env:
           DOCKER_TLS_CERTDIR: ""
+        # healthcheck: the runner waits for the daemon to be ready (and registers
+        # the service alias) before the job starts — without it the build races
+        # the daemon and name resolution fails.
         options: >-
-          --privileged
+          --privileged --health-cmd "docker info" --health-interval 5s --health-timeout 5s --health-retries 30
     env:
       DOCKER_HOST: tcp://dind:2375
     steps:

@@ -5,13 +5,13 @@
 #   make sbom     generate the CycloneDX SBOM (needs cyclonedx-gomod)
 #   make docker   build the node image tagged with VERSION
 #   make release  test + build + sbom + docker (the full release gate)
+#   make tag      create + push the v$(VERSION) tag (one command release)
 #
 # Tagging a release:
 #   1. Update VERSION and CHANGELOG.md.
 #   2. make release
-#   3. git tag -a v$(cat VERSION) -m "cl0q node $(cat VERSION)"
-#   4. git push origin v$(cat VERSION)
-#   5. Push the image to your registry:
+#   3. make tag
+#   4. Push the image to your registry:
 #        docker tag cl0q-node:$(cat VERSION) registry.example.com/cl0q-node:$(cat VERSION)
 #        docker push registry.example.com/cl0q-node:$(cat VERSION)
 
@@ -45,6 +45,14 @@ docker:
 
 release: vet test build sbom docker
 	@echo "release $(VERSION) ready: binaries in dist/, SBOM in dist/, image cl0q-node:$(VERSION)"
+
+# One-command release: gate on `make release` first, then tag + push.
+tag:
+	@test -z "$$(git status --porcelain)" || (echo "refusing: working tree not clean" && exit 1)
+	@git rev-parse -q --verify "refs/tags/v$(VERSION)" >/dev/null && (echo "refusing: tag v$(VERSION) already exists" && exit 1)
+	git tag -a "v$(VERSION)" -m "cl0q node $(VERSION)"
+	git push origin "v$(VERSION)"
+	@echo "tagged + pushed v$(VERSION)"
 
 clean:
 	rm -rf dist

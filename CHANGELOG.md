@@ -10,8 +10,16 @@ enroll in one command, verify with preflight, run with Docker Compose.
 
 ### Added
 - **Enrol client** (`cl0q-node enroll`): one-command enrolment per
-  PROTOCOL.md §1. Stores node_id + token as JSON with mode 0600, never
-  prints the token. Re-enrol is idempotent rotation.
+  PROTOCOL.md §1. First enrol returns node_id + token + refresh_secret
+  (shown once). Stores all three as JSON with mode 0600, never prints
+  either secret. Re-enrol rotates the token, authenticated by
+  node_id + refresh_secret — a rotation request carrying only the
+  node_id is refused. New nodes start quarantined.
+- **Trust states & quarantine**: quarantined nodes' submissions land in a
+  staging area and never reach the live index until graduation (1,000
+  spot-verified samples at 98%+ hash match and 3 clean days, or 7 clean
+  days flat). Quota while quarantined: 25k submissions/day; on 429 the
+  node backs off and spools locally — submissions are never dropped.
 - **Preflight self-check** (`cmd/preflight`): six PASS/FAIL checks —
   local DB, ingest reachability + token validity, DNS, HTTPS egress,
   netguard SSRF guard, robots.txt fetch + parse. Exit 1 on any failure.

@@ -99,9 +99,10 @@ jobs:
           DOCKER_TLS_CERTDIR: ""
         # healthcheck: the runner waits for the daemon to be ready (and registers
         # the service alias) before the job starts — without it the build races
-        # the daemon and name resolution fails.
+        # the daemon and name resolution fails. Target the TCP endpoint the
+        # daemon actually listens on (the default socket may not be up yet).
         options: >-
-          --privileged --health-cmd "docker info" --health-interval 5s --health-timeout 5s --health-retries 30
+          --privileged --health-cmd "docker -H tcp://127.0.0.1:2375 version" --health-interval 5s --health-timeout 10s --health-retries 30 --health-start-period 10s
     env:
       DOCKER_HOST: tcp://dind:2375
     steps:

@@ -14,9 +14,18 @@ import (
 	"time"
 
 	"golang.org/x/net/html"
+
+	"cl0q/internal/tunable"
 )
 
 // Pruning keeps a gate that is still enforcing a gap, and drops (and marks dead) one idle past gateIdle.
+
+func init() {
+	if tunables == nil {
+		tunables = tunable.New(time.Second, time.Second, 50)
+	}
+}
+
 func TestPruneGatesNeverShortensAWait(t *testing.T) {
 	var gates sync.Map
 	throttle(&gates, "k", 200*time.Millisecond)
@@ -178,7 +187,7 @@ func TestDiscoveryFolding(t *testing.T) {
 
 // Concurrent callers for one host share a single robots.txt request.
 func TestRobotsForSingleFetch(t *testing.T) {
-	ipDelay = 0
+	tunables.Update(tunable.Config{IPDelayMs: intPtr(0)})
 	var hits atomic.Int32
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)

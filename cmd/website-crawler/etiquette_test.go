@@ -15,6 +15,7 @@ import (
 
 	"cl0q/botid"
 	"cl0q/crawlutil"
+	"cl0q/internal/tunable"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -58,6 +59,12 @@ func newCounter(t *testing.T, handle func(net.Conn)) *connCounter {
 
 func (c *connCounter) n() int { c.mu.Lock(); defer c.mu.Unlock(); return len(c.times) }
 
+func init() {
+	tunables = tunable.New(time.Second, time.Second, 50)
+}
+
+func intPtr(i int) *int { return &i }
+
 func TestHTTPSUnavailable(t *testing.T) {
 	yes := []string{"dial tcp 1.2.3.4:443: connect: connection refused", "tls: failed to verify certificate: x509: certificate signed by unknown authority",
 		"http: server gave HTTP response to HTTPS client", "tls: first record does not look like a TLS handshake"}
@@ -79,7 +86,7 @@ func TestHTTPSUnavailable(t *testing.T) {
 
 // A server that drops every connection (nginx 444 / WAF) must get exactly ONE robots request, no http:// retry.
 func TestRobotsBlockedServerGetsOneRequest(t *testing.T) {
-	ipDelay = 0
+	tunables.Update(tunable.Config{IPDelayMs: intPtr(0)})
 	c := newCounter(t, func(conn net.Conn) { conn.Close() })
 	host := c.ln.Addr().String()
 	ri := fetchRobots(host, "")
@@ -101,7 +108,7 @@ func TestRobotsBlockedServerGetsOneRequest(t *testing.T) {
 
 // Plain-HTTP server: https fails as "not TLS" → ONE paced http:// fallback, and the gap respects ipDelay.
 func TestFallbackIsPaced(t *testing.T) {
-	ipDelay = 300 * time.Millisecond
+	tunables.Update(tunable.Config{IPDelayMs: intPtr(300)})
 	ipGates = sync.Map{}
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("User-agent: *\nCrawl-delay: 2\n"))
@@ -125,13 +132,13 @@ func TestFallbackIsPaced(t *testing.T) {
 		t.Fatalf("want 2 connections (failed https + http), got %d", len(seen))
 	}
 	if gap := seen[1].Sub(seen[0]); gap < 250*time.Millisecond {
-		t.Fatalf("http fallback not paced: gap %v < ipDelay", gap)
+		t.Fatalf("http fallback not paced: gap %v < %v", gap, tunables.IPDelay())
 	}
 }
 
 // Closed port: https refused → http tried (also refused) → permissive, not a block.
 func TestRefusedPortIsNotABlock(t *testing.T) {
-	ipDelay = 0
+	tunables.Update(tunable.Config{IPDelayMs: intPtr(0)})
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	host := ln.Addr().String()
 	ln.Close()
@@ -143,7 +150,7 @@ func TestRefusedPortIsNotABlock(t *testing.T) {
 
 // The page fetch must also stop after a dropped connection instead of retrying over http://.
 func TestPageFetchNoFallbackAfterDrop(t *testing.T) {
-	ipDelay = 0
+	tunables.Update(tunable.Config{IPDelayMs: intPtr(0)})
 	c := newCounter(t, func(conn net.Conn) { conn.Close() })
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -251,9 +258,9 @@ func fetch(t *testing.T, host string, rules *robotstxt.Rules) *WebsiteInfo {
 // Same-site redirect hops are followed, paced per site; a hop robots.txt disallows is not; an off-site redirect is
 // recorded for discovery instead of followed; chains stop after maxRedirects hops.
 func TestRedirectPolicy(t *testing.T) {
-	ipDelay = 0
-	hostDelay = 150 * time.Millisecond
-	defer func() { hostDelay = 0 }()
+	tunables.Update(tunable.Config{IPDelayMs: intPtr(0)})
+	tunables.Update(tunable.Config{HostDelayMs: intPtr(150)})
+	defer func() { tunables.Update(tunable.Config{HostDelayMs: intPtr(1000)}) }()
 	html := func(w http.ResponseWriter) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Write([]byte("<html><head><title>ok</title></head><body>hi</body></html>"))
@@ -298,7 +305,7 @@ func TestRedirectPolicy(t *testing.T) {
 		n++
 		http.Redirect(w, r, "/hop"+strconv.Itoa(n), http.StatusFound)
 	})
-	hostDelay = 0
+	tunables.Update(tunable.Config{HostDelayMs: intPtr(0)})
 	if info := fetch(t, host, nil); info.StatusCode != http.StatusFound || info.RedirectCount != maxRedirects {
 		t.Fatalf("redirect chain: status %d after %d hops", info.StatusCode, info.RedirectCount)
 	}
@@ -311,7 +318,7 @@ func TestRedirectPolicy(t *testing.T) {
 func TestPolitenessFloors(t *testing.T) {
 	en, th, wi, ba, ca := breaker.enabled, breaker.threshold, breaker.window, breaker.base, breaker.cap
 	t.Cleanup(func() {
-		hostDelay, ipDelay = 0, 0
+		tunables.Update(tunable.Config{HostDelayMs: intPtr(1000), IPDelayMs: intPtr(1000)})
 		breaker.enabled, breaker.threshold, breaker.window, breaker.base, breaker.cap = en, th, wi, ba, ca
 	})
 	for k, v := range map[string]string{"HOST_DELAY_MS": "0", "IP_DELAY_MS": "-5", "ASN_MAX_PER_BATCH": "500",
@@ -321,17 +328,17 @@ func TestPolitenessFloors(t *testing.T) {
 		t.Setenv(k, v)
 	}
 	loadPoliteness()
-	if hostDelay != minHostDelay || ipDelay != minIPDelay || perGroupCap != maxPerGroup || throttleRetries != 1 ||
+	if tunables.HostDelay() != minHostDelay || tunables.IPDelay() != minIPDelay || perGroupCap != maxPerGroup || throttleRetries != 1 ||
 		throttleWaitMax != maxRetryWait || !breaker.enabled || breaker.threshold != breakThreshold ||
 		breaker.window != breakWindow || breaker.base != breakBase || breaker.cap != breakCap || recrawlDays() != minRecrawlDays {
 		t.Fatalf("floors not enforced: host=%s ip=%s group=%d retries=%d wait=%s breaker=%v/%d/%s/%s/%s recrawl=%d",
-			hostDelay, ipDelay, perGroupCap, throttleRetries, throttleWaitMax, breaker.enabled, breaker.threshold, breaker.window, breaker.base, breaker.cap, recrawlDays())
+			tunables.HostDelay(), tunables.IPDelay(), perGroupCap, throttleRetries, throttleWaitMax, breaker.enabled, breaker.threshold, breaker.window, breaker.base, breaker.cap, recrawlDays())
 	}
 	t.Setenv("HOST_DELAY_MS", "5000") // gentler than the floor is fine
 	t.Setenv("ASN_MAX_PER_BATCH", "3")
 	loadPoliteness()
-	if hostDelay != 5*time.Second || perGroupCap != 3 {
-		t.Fatalf("gentler settings must be kept: host=%s group=%d", hostDelay, perGroupCap)
+	if tunables.HostDelay() != 5*time.Second || perGroupCap != 3 {
+		t.Fatalf("gentler settings must be kept: host=%s group=%d", tunables.HostDelay(), perGroupCap)
 	}
 }
 

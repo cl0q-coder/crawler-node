@@ -86,6 +86,7 @@ import (
 	"cl0q/internal/metrics"
 	"cl0q/internal/simhash"
 	"cl0q/internal/sitemap"
+	"cl0q/internal/tunable"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -94,6 +95,23 @@ import (
 // To avoid hammering a single host (and getting rate-blocked) when a batch contains many
 // names on the same site/infra — common because the subdomain enumerator inserts many
 // hosts of one apex together — we gate requests per registrable domain (eTLD+1): same-host
+// IG6: watchControlFile polls a JSON control file for live tuning.
+// Operators edit the file; changes apply without restart.
+func watchControlFile(path string) {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		cfg, err := tunable.LoadFile(path)
+		if err != nil {
+			continue // file missing or invalid; keep current settings
+		}
+		if tunables.Update(cfg) {
+			log.Printf("IG6: control file updated: host_delay=%v ip_delay=%v max_conc=%d",
+				tunables.HostDelay(), tunables.IPDelay(), tunables.MaxConcurrency())
+		}
+	}
+}
+
 // requests are spaced at least hostDelay apart. Gates idle for longer than gateIdle are pruned so the maps stay
 // small; they are never reset wholesale, which would let the first request of a batch follow the last request of
 // the previous one to the same server too soon.
@@ -108,10 +126,9 @@ type hostGate struct {
 const gateIdle = 2 * time.Minute
 
 var (
-	hostGates sync.Map // eTLD+1 -> *hostGate
-	hostDelay time.Duration
-	ipGates   sync.Map // resolved IPv4 -> *hostGate (paces shared-hosting servers, not just names)
-	ipDelay   time.Duration
+	hostGates sync.Map          // eTLD+1 -> *hostGate
+	tunables  *tunable.Tunables // IG6: live-tunable delays (control file, no restart)
+	ipGates   sync.Map          // resolved IPv4 -> *hostGate (paces shared-hosting servers, not just names)
 )
 
 func hostKey(domain string) string {
@@ -183,12 +200,12 @@ func pruneGates(gates *sync.Map, idle time.Duration) {
 }
 
 // hostThrottle spaces requests to the same registrable host (eTLD+1) by at least hostDelay.
-func hostThrottle(domain string) { throttle(&hostGates, hostKey(domain), hostDelay) }
+func hostThrottle(domain string) { throttle(&hostGates, hostKey(domain), tunables.HostDelay()) }
 
 // ipThrottle spaces requests to the same server IP by at least ipDelay — so a batch full of
 // distinct names that all resolve to one shared-hosting box doesn't hammer that one server
 // (which is what earns "too many requests / bad bot" reports even when each host is hit once).
-func ipThrottle(ip string) { throttle(&ipGates, ip, ipDelay) }
+func ipThrottle(ip string) { throttle(&ipGates, ip, tunables.IPDelay()) }
 
 // T1: sitemap discovery state. sitemapChecked records the last time we fetched
 // sitemaps for a domain; rechecks are throttled to sitemapRecheckInterval so a
@@ -259,8 +276,14 @@ func envDuration(k string, def time.Duration) time.Duration {
 // loadPoliteness reads the politeness settings, clamped to the floors above. robots.txt, the circuit breaker and
 // the no-retry-after-a-failure rule have no setting at all.
 func loadPoliteness() {
-	hostDelay = max(envDuration("HOST_DELAY_MS", minHostDelay), minHostDelay)
-	ipDelay = max(envDuration("IP_DELAY_MS", minIPDelay), minIPDelay)
+	hostDelayInit := max(envDuration("HOST_DELAY_MS", minHostDelay), minHostDelay)
+	ipDelayInit := max(envDuration("IP_DELAY_MS", minIPDelay), minIPDelay)
+	maxConcInit := envInt("MAX_CONCURRENCY", 50)
+	tunables = tunable.New(hostDelayInit, ipDelayInit, maxConcInit)
+	// IG6: watch control file for live tuning (no restart).
+	if cf := os.Getenv("CONTROL_FILE"); cf != "" {
+		go watchControlFile(cf)
+	}
 	perGroupCap = clampInt(envInt("ASN_MAX_PER_BATCH", maxPerGroup), 1, maxPerGroup)
 	throttleRetries = clampInt(envInt("THROTTLE_RETRIES", 1), 0, 1)
 	throttleWaitMax = min(max(envDuration("THROTTLE_WAIT_MAX_MS", maxRetryWait), 0), maxRetryWait)
@@ -749,7 +772,7 @@ func main() {
 	// breaker.threshold times within the window, its targets are deferred for an exponential cooldown
 	// so rate-blocked or dead infra isn't hammered.
 	log.Printf("politeness: host_delay=%s ip_delay=%s max_per_group=%d recrawl_days=%d throttle_retries=%d retry_wait_max=%s breaker threshold=%d window=%s cooldown=%s..%s pool_factor=%d",
-		hostDelay, ipDelay, perGroupCap, recrawlDays(), throttleRetries, throttleWaitMax,
+		tunables.HostDelay(), tunables.IPDelay(), perGroupCap, recrawlDays(), throttleRetries, throttleWaitMax,
 		breaker.threshold, breaker.window, breaker.base, breaker.cap, envInt("ASN_POOL_FACTOR", 3))
 	dbBatch := envInt("DB_BATCH", 200) // crawl results per DB transaction (multi-row upsert) — fewer commits = far less remote WAL/fsync load
 	if dbBatch < 1 {
@@ -997,7 +1020,7 @@ func main() {
 
 	loop := envBool("LOOP", false)
 	log.Printf("crawler start: workers=%d dials=%d db_pool=%d db_batch=%d timeout=%s host_delay=%s loop=%v emit=%v ua=%q",
-		workers, cap(dialSem), dbConns, dbBatch, fetchTimeout, hostDelay, loop, emitStmt != nil, userAgent)
+		workers, cap(dialSem), dbConns, dbBatch, fetchTimeout, tunables.HostDelay(), loop, emitStmt != nil, userAgent)
 
 	// PIPELINE=1: continuous pipelined crawl (no per-batch barrier — see crawlContinuous).
 	// Only meaningful in LOOP mode; it runs forever. Default off → the proven batch path below.
@@ -1335,7 +1358,7 @@ func crawlBatch(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, targets
 	// targets whose host is already eligible. Workers never block on politeness;
 	// the throttle gates remain as a safety net.
 	// (The old rand.Shuffle is gone: OPIC score order from the frontier is the priority.)
-	fq := newFrontQueue(targets, hostDelay)
+	fq := newFrontQueue(targets, tunables.HostDelay())
 	pruneGates(&hostGates, gateIdle)
 	pruneGates(&ipGates, gateIdle)
 	// robotsCache is keyed per DOMAIN, but every domain is crawled ~once (web_crawled_at),
@@ -2496,7 +2519,7 @@ func dryRunEnvelope(host string, info *WebsiteInfo) map[string]any {
 
 // sitePace waits out the per-site gap before a request to host: hostDelay, or the site's Crawl-delay if longer.
 func sitePace(host string, crawlDelay time.Duration) {
-	throttle(&hostGates, hostKey(strings.ToLower(host)), max(hostDelay, crawlDelay))
+	throttle(&hostGates, hostKey(strings.ToLower(host)), max(tunables.HostDelay(), crawlDelay))
 }
 
 // throttled reports a 429 Too Many Requests / 503 Service Unavailable response.

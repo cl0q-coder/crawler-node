@@ -131,7 +131,12 @@ func TestCapBatchEnforcesPerGroupCap(t *testing.T) {
 // pool entries (which would starve the tail forever).
 func TestCapBatchShufflesAdmission(t *testing.T) {
 	seenFirst := map[string]int{}
-	for run := 0; run < 20; run++ {
+	// 200 runs, not 20: with 5-from-40 uniform admission, P(a given entry is
+	// never admitted in 20 runs) = (7/8)^20 ≈ 7% — a flake, not a signal.
+	// At 200 runs that drops to (7/8)^200 ≈ 1.6e-12. A broken (unshuffled)
+	// capBatch still fails deterministically: s0 would be admitted 200/200.
+	const runs = 200
+	for run := 0; run < runs; run++ {
 		var ts []target
 		for i := 0; i < 40; i++ {
 			ts = append(ts, target{domain: fmt.Sprintf("s%d.example.com", i), org: "ShuffleASN"})
@@ -140,13 +145,13 @@ func TestCapBatchShufflesAdmission(t *testing.T) {
 			seenFirst[g.domain]++
 		}
 	}
-	// With shuffling, across 20 runs of 5-from-40, the first pool entry
+	// With shuffling, across 200 runs of 5-from-40, the first pool entry
 	// should NOT appear every time, and the last should appear sometimes.
-	if seenFirst["s0.example.com"] == 20 {
-		t.Error("s0 admitted in all 20 runs — admission is not shuffled, tail starves")
+	if seenFirst["s0.example.com"] == runs {
+		t.Error("s0 admitted in all 200 runs — admission is not shuffled, tail starves")
 	}
 	if seenFirst["s39.example.com"] == 0 {
-		t.Error("s39 never admitted in 20 runs — admission is not shuffled, tail starves")
+		t.Error("s39 never admitted in 200 runs — admission is not shuffled, tail starves")
 	}
 }
 

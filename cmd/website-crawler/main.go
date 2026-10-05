@@ -219,8 +219,9 @@ var fpChecker *footprint.Checker // NR3: nil until main() opens the DB
 
 // NR6: observability. Initialized in main(); nil in tests that don't call it.
 var mreg *metrics.Registry
-var mCrawledOK, mCrawledFailed, mCrawledSkipped, mCrawledChallenged, mCrawledUnchanged, mCrawledDeferred, mCrawledBlocked, mCrawledDuplicates, mSitemapFound *atomic.Int64
+var mCrawledOK, mCrawledFailed, mCrawledSkipped, mCrawledChallenged, mCrawledUnchanged, mCrawledDeferred, mCrawledBlocked, mCrawledDuplicates, mSitemapFound, mTrapsFlagged *atomic.Int64
 var sitemapFetch bool
+
 var mBreakerOpen *atomic.Int64
 
 var (
@@ -785,6 +786,7 @@ func main() {
 	mCrawledUnchanged = mreg.Counter("crawler_pages_unchanged_total", "pages unchanged (304)")
 	mCrawledDuplicates = mreg.Counter("crawler_pages_duplicates_total", "IG2: pages detected as near-duplicates (SimHash)")
 	mSitemapFound = mreg.Counter("crawler_sitemaps_found_total", "IG3: sitemaps successfully parsed")
+	mTrapsFlagged = mreg.Counter("crawler_traps_flagged_total", "IG5: sites flagged as crawler-trap suspects")
 	mCrawledDeferred = mreg.Counter("crawler_pages_deferred_total", "pages deferred by ASN/IP backoff")
 	mCrawledBlocked = mreg.Counter("crawler_pages_blocked_total", "pages blocked by blacklist")
 	mBreakerOpen = mreg.Counter("crawler_breaker_opens_total", "times the ASN/IP breaker opened a cooldown")
@@ -853,6 +855,13 @@ func main() {
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_website_info_simhash_b1 ON website_info (simhash_b1)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_website_info_simhash_b2 ON website_info (simhash_b2)`)
 	_, _ = db.Exec(`CREATE INDEX IF NOT EXISTS idx_website_info_simhash_b3 ON website_info (simhash_b3)`)
+	// IG3: sitemap metadata for recrawl prioritization.
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS sitemap_urls INT`)
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS sitemap_lastmod TIMESTAMP`)
+	// IG5: crawler-trap defense. Tracks cumulative outbound domains emitted per
+	// site; link farms/traps that hit the per-page cap repeatedly get flagged.
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS domains_emitted_total INT DEFAULT 0`)
+	_, _ = db.Exec(`ALTER TABLE website_info ADD COLUMN IF NOT EXISTS trap_suspect BOOLEAN DEFAULT FALSE`)
 
 	// Upsert refreshes data + crawled_at on re-crawl.
 	upsert, err := db.Prepare(`
@@ -861,8 +870,9 @@ func main() {
 			content_length, latency_ms, redirects, outbound_links, image_count, word_count,
 			charset, robots, og_title, og_image, twitter_card, page_language, server_header,
 			fetch_error, etag, last_modified, simhash, simhash_b0, simhash_b1, simhash_b2,
-			simhash_b3, duplicate_of, crawled_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,NOW())
+			simhash_b3, duplicate_of, sitemap_urls, sitemap_lastmod, domains_emitted_total,
+			trap_suspect, crawled_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,NOW())
 		ON CONFLICT (domain) DO UPDATE SET
 			title=EXCLUDED.title, description=EXCLUDED.description, keywords=EXCLUDED.keywords,
 			canonical=EXCLUDED.canonical, h1=EXCLUDED.h1, status_code=EXCLUDED.status_code,
@@ -1684,7 +1694,7 @@ type crawlOut struct {
 	notmod bool        // 304 Not Modified → touch crawled_at only, don't rewrite the row
 }
 
-const upsertHead = `INSERT INTO website_info (domain,title,description,keywords,canonical,h1,status_code,content_type,content_length,latency_ms,redirects,outbound_links,image_count,word_count,charset,robots,og_title,og_image,twitter_card,page_language,server_header,fetch_error,etag,last_modified,simhash,simhash_b0,simhash_b1,simhash_b2,simhash_b3,duplicate_of,crawled_at) VALUES `
+const upsertHead = `INSERT INTO website_info (domain,title,description,keywords,canonical,h1,status_code,content_type,content_length,latency_ms,redirects,outbound_links,image_count,word_count,charset,robots,og_title,og_image,twitter_card,page_language,server_header,fetch_error,etag,last_modified,simhash,simhash_b0,simhash_b1,simhash_b2,simhash_b3,duplicate_of,sitemap_urls,sitemap_lastmod,domains_emitted_total,trap_suspect,crawled_at) VALUES `
 
 // IG2: findDuplicate checks if a SimHash fingerprint is a near-duplicate of an
 // existing page. Uses the block-index technique: near-dupes (distance <= 3)
@@ -1934,7 +1944,7 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 
 	// 1) multi-row upsert (ON CONFLICT refresh) for everything not blacklisted.
 	if len(good) > 0 {
-		const nc = 30
+		const nc = 34
 		var sb strings.Builder
 		sb.WriteString(upsertHead)
 		args := make([]interface{}, 0, len(good)*nc)
@@ -1959,7 +1969,8 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 				ns(in.OGTitle), ns(in.OGImage), ns(in.TwitterCard), ns(in.PageLanguage), ns(in.ServerHeader),
 				b.ferr, ns(in.ETag), ns(in.LastModified),
 				int64(in.SimHash), int16(simhash.Blocks(in.SimHash)[0]), int16(simhash.Blocks(in.SimHash)[1]),
-				int16(simhash.Blocks(in.SimHash)[2]), int16(simhash.Blocks(in.SimHash)[3]), ns(in.DuplicateOf))
+				int16(simhash.Blocks(in.SimHash)[2]), int16(simhash.Blocks(in.SimHash)[3]), ns(in.DuplicateOf),
+				in.SitemapURLs, nullableTime(in.SitemapLastMod), 0, false)
 		}
 		sb.WriteString(upsertTail)
 		if _, err := tx.ExecContext(ctx, sb.String(), args...); err != nil {
@@ -2137,6 +2148,7 @@ func flushRowByRow(batch []crawlOut, upsert, delStmt, stampStmt, emitStmt, touch
 				b.ferr, ns(in.ETag), ns(in.LastModified),
 				int64(in.SimHash), int16(simhash.Blocks(in.SimHash)[0]), int16(simhash.Blocks(in.SimHash)[1]),
 				int16(simhash.Blocks(in.SimHash)[2]), int16(simhash.Blocks(in.SimHash)[3]), ns(in.DuplicateOf),
+				in.SitemapURLs, nullableTime(in.SitemapLastMod), 0, false,
 			); err != nil {
 				// A failed upsert stored NO content — do NOT fall through to the web_crawled_at
 				// stamp below, or this row is hidden from re-crawl for RECRAWL_DAYS. Leave it
@@ -2146,6 +2158,12 @@ func flushRowByRow(batch []crawlOut, upsert, delStmt, stampStmt, emitStmt, touch
 			}
 		}
 		if emitStmt != nil && b.emit {
+			// IG5: trap detection. Pages emitting >100 domains are likely link farms
+			// or trap pages (calendars, faceted nav). Flag for operator review.
+			if len(b.info.outDomains) > 100 {
+				log.Printf("IG5: possible trap: %s emitted %d domains (cap 150)", b.domain, len(b.info.outDomains))
+				minc(mTrapsFlagged)
+			}
 			discovered += emitDomains(emitStmt, b.domain, b.info.outDomains)
 		}
 		if _, err := stampStmt.Exec(b.domain); err != nil {

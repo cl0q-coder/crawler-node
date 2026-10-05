@@ -8,16 +8,20 @@ is that crawler, packaged so other people can run a **node**: it discovers sites
 politely, and sends what it finds to cl0q's index. The search engine itself is not part of this repository
 (see [cl0q-search](../cl0q-search)).
 
-The node program is in **early access**: nodes are enrolled by hand. Email
-[cl0qsearch@gmail.com](mailto:cl0qsearch@gmail.com) if you'd like to run one.
-
 ## Quick start
 
 ```bash
-cp .env.example .env   # fill in CL0Q_NODE_ID, NODE_TOKEN, DB_PASSWORD (from enrollment)
-docker compose up -d --build
+cp .env.example .env   # fill in DB_PASSWORD
+docker compose build
+docker compose run --rm cl0q-node enroll --contact you@example.com  # one-command enrol
+docker compose run --rm preflight   # self-check: all six must PASS
+docker compose up -d
 docker compose logs -f website-crawler node
 ```
+
+See **[docs/NODE_OPERATORS.md](docs/NODE_OPERATORS.md)** for the full
+operator guide: the 5-minute quickstart, what data a node sends (and never
+sends), and stop/update/uninstall.
 
 ## How it works
 

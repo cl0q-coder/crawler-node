@@ -1,0 +1,136 @@
+# Running a cl0q crawler node
+
+A node crawls the public web from your server and sends what it finds to
+cl0q's search index. Five minutes from zero to crawling.
+
+## What you need
+
+- A server (VPS, homelab box, anything with Docker) with a **public IP**
+  and a provider that allows crawling.
+- Docker + Docker Compose.
+- About 2 GB RAM free and 10 GB disk for the node's local database.
+
+Nothing listens on a public port. Your node only makes outbound requests.
+
+## 1. Enroll (one command)
+
+```sh
+git clone https://gitea.cl0q.com/chris/crawler-node && cd crawler-node
+docker compose build
+docker compose run --rm cl0q-node enroll --contact you@example.com
+```
+
+This calls cl0q, gets your unique `NODE_ID` plus a secret token, and
+stores both in `cl0q-node.json` (mode `0600`, never shown or logged).
+The contact email is optional but recommended — it's how cl0q reaches you
+if your node ever causes trouble.
+
+Your node starts **quarantined**: its submissions are spot-verified before
+they reach the live index. Good behaviour earns trust automatically
+(about a week, or 1,000 verified submissions).
+
+## 2. Configure
+
+```sh
+cp .env.example .env
+```
+
+Edit `.env`: set `DB_PASSWORD` (any strong password — it's only for the
+node's own Postgres, unreachable from outside). If you enrolled with the
+command above, you don't need to set `NODE_TOKEN` or `CL0Q_NODE_ID` — the
+node reads them from `cl0q-node.json`.
+
+## 3. Preflight
+
+```sh
+docker compose run --rm preflight
+```
+
+Six checks, each a clear PASS/FAIL: local database, ingest reachability +
+token validity, DNS, outbound HTTPS, the SSRF guard (it must refuse
+private addresses), and robots.txt fetching. All six must pass. If the
+ingest check fails, your token or IP isn't accepted — re-run `enroll`.
+
+## 4. Go live
+
+```sh
+docker compose up -d
+docker compose logs -f website-crawler node
+```
+
+You should see pages being fetched within a minute. The `node` service
+forwards new results to cl0q every 60 seconds.
+
+## 5. Verify it's crawling
+
+```sh
+docker compose logs --tail=50 website-crawler | grep -i "crawled\|fetched"
+```
+
+Or dry-run a single URL through the real pipeline (writes nothing):
+
+```sh
+docker compose run --rm -e SINGLE_URL=https://example.com website-crawler
+```
+
+This prints exactly the JSON row the node would send for that URL.
+
+## Stop / update / uninstall
+
+```sh
+docker compose down            # stop everything (data kept in the pgdata volume)
+docker compose pull && docker compose up -d --build   # update to the latest image
+docker compose down -v         # stop AND delete all local data (fresh start)
+```
+
+To leave the network for good: `docker compose down -v`, then tell
+cl0q (cl0qsearch@gmail.com) so your node id is retired.
+
+## If something breaks
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `preflight` ingest FAIL | Token rejected or IP changed | `docker compose run --rm cl0q-node enroll` (rotates the token) |
+| `CL0Q_NODE_ID is not set` | Enrol didn't run | Run step 1; check `cl0q-node.json` exists |
+| `invalid WORKERS=...` etc. | Bad setting in `.env` | The message names the knob and the allowed range — fix the value |
+| Node runs but sends nothing | DB or ingest unreachable | `docker compose logs node`, then `preflight` |
+
+Every setting is validated at startup: a bad value refuses to start with
+a clear error instead of silently misbehaving.
+
+---
+
+## Data & privacy
+
+Plain language, because you're trusting this software on your server.
+
+**What your node sends to cl0q**, per crawled page: the domain, page
+title, description, keywords, canonical URL, first heading, HTTP status,
+content type and length, response time, redirect count, counts of outbound
+links/images/words, charset, robots meta tag, Open Graph / Twitter Card
+fields, page language, `Server` header, fetch error if any, and ETag /
+Last-Modified validators. Per discovered domain: its IP addresses, MX
+and CNAME records, and which page it was found on. Plus a SHA-256 hash
+of the page content, so cl0q can spot-verify submissions.
+
+**What it never sends:** page body text (only its hash), anything about
+you or your server beyond the node id, or any other traffic on your
+machine. The node holds no cl0q credentials and cl0q holds none of yours.
+
+**Who else sees part of the work** (as with any crawler): public DNS
+resolvers (Cloudflare, Google, Quad9) see the domain names looked up;
+ipinfo.io sees IP addresses *only* if you set `IPINFO_TOKEN`.
+
+**What site owners see:** every request carries
+`Mozilla/5.0 (compatible; cl0q-node/1.0; operator=<your-node-id>;
++https://cl0q.com/bot)`. A site can block all nodes with one robots.txt
+group (`User-agent: cl0q-node`), and the node always honors robots.txt,
+per-host pacing (≥1s between requests to one site), and backoff on 429s.
+The crawler never touches private, loopback, link-local, or cloud
+metadata addresses.
+
+**Your obligations:** run the code as published (don't weaken the
+politeness rules or change the User-Agent), crawl from the IP you
+enrolled with on a network that allows it, read abuse reports your
+provider forwards, and keep your token private — if it leaks, re-enroll
+to rotate it.

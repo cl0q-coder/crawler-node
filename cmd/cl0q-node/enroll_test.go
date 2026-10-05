@@ -202,3 +202,45 @@ func TestRunEnrollLegacyCredsFallBackToFreshEnrol(t *testing.T) {
 		t.Errorf("legacy creds must trigger fresh enrol (no node_id sent), sent %+v", got)
 	}
 }
+
+// D1 (P1 #4): the enrol client must never follow redirects — the request
+// carries the refresh_secret on re-enrol, and following a 3xx would leak it
+// to the redirect target.
+func TestDoEnrollRefusesRedirect(t *testing.T) {
+	var redirectHit bool
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirectHit = true // the secret must never reach here
+	}))
+	defer target.Close()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Evil/misconfigured server: redirect the enrol POST elsewhere.
+		http.Redirect(w, r, target.URL+"/api/nodes/enroll", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.json")
+	// Pre-seed credentials so this is a re-enrol carrying the refresh_secret.
+	creds, _ := json.Marshal(nodeCredentials{NodeID: "nd-test1", Token: "tok", RefreshSecret: "rs-super-secret"})
+	if err := os.WriteFile(path, creds, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := doEnroll(srv.URL, "op@example.com", path)
+	if err == nil {
+		t.Fatal("doEnroll must fail on 3xx redirect, got nil error")
+	}
+	if redirectHit {
+		t.Fatal("redirect target was hit — refresh_secret may have leaked")
+	}
+	// No credentials file should have been written from a redirect response.
+	if _, statErr := os.Stat(path); statErr == nil {
+		data, _ := os.ReadFile(path)
+		var c nodeCredentials
+		json.Unmarshal(data, &c)
+		if c.NodeID != "nd-test1" {
+			t.Errorf("credentials file was overwritten by redirect flow: %+v", c)
+		}
+	}
+}

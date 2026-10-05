@@ -20,14 +20,49 @@ docker compose build
 docker compose run --rm cl0q-node enroll --contact you@example.com
 ```
 
-This calls cl0q, gets your unique `NODE_ID` plus a secret token, and
-stores both in `cl0q-node.json` (mode `0600`, never shown or logged).
+This calls cl0q's ingest server and enrolls you as a node. The server
+returns three things: your unique `NODE_ID`, a secret token, and a
+**refresh secret** (used only to rotate your token later). All three are
+stored in `cl0q-node.json` (mode `0600`, never shown or logged — the
+secrets are printed nowhere, not even in your own terminal).
 The contact email is optional but recommended — it's how cl0q reaches you
 if your node ever causes trouble.
 
-Your node starts **quarantined**: its submissions are spot-verified before
-they reach the live index. Good behaviour earns trust automatically
-(about a week, or 1,000 verified submissions).
+The command tells you your trust state when it finishes. Every new node
+starts **quarantined**.
+
+### Quarantine, plainly
+
+While quarantined, your node works exactly like a trusted one — except
+cl0q **spot-verifies** a sample of your submissions before any of them
+enter the live index. Spot-verification means: cl0q re-fetches the URL
+itself, compares the page's content hash with yours, and confirms you
+honored robots.txt and the address guard. Your submissions are kept in a
+staging area meanwhile — **nothing you submit is lost while quarantined**.
+A well-behaved node graduates automatically: either 1,000
+spot-verified submissions at 98%+ hash match with 3 clean days, or 7
+clean days flat.
+
+Three trust states exist: `quarantined` (new / under verification),
+`trusted` (graduated — submissions flow to the live index normally), and
+`revoked` (token rejected; the node wipes its token and re-enrols on the
+next run).
+
+While quarantined you may send up to 25,000 submissions per day. If you
+hit that quota the server answers 429 — your node backs off and spools
+the batch to its local database. It retries later. **Submissions are
+never dropped.** If 3 of your spot-verifications fail in a 24-hour
+window, you're re-quarantined (trust goes back to zero).
+
+### Rotation
+
+If a token leaks (or the server revokes it), rotate with the refresh
+secret: re-run `enroll`. The client sends your `node_id` **plus** the
+stored `refresh_secret`; the server refuses rotation requests that carry
+only the `node_id` (it's printed in your public User-Agent, so anyone
+could read it off a site's logs). Nodes running on plain `NODE_TOKEN` /
+`CL0Q_NODE_ID` environment variables can't rotate — there's no refresh
+secret stored there, so enrol into a credentials file first.
 
 ## 2. Configure
 

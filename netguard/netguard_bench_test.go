@@ -44,7 +44,7 @@ func BenchmarkPublic(b *testing.B) {
 // Public check — exactly as the dialer invokes it per connection attempt.
 // The refused variants allocate (fmt.Errorf); the public fast path must not.
 func BenchmarkControl(b *testing.B) {
-	AllowNonPublic = false
+	allowNonPublic = false
 	cases := []struct {
 		name string
 		addr string

@@ -25,7 +25,7 @@ import (
 func init() {
 	dialSem = make(chan struct{}, 8)
 	userAgent, _ = botid.UserAgent("test-node")
-	netguard.AllowNonPublic = true
+	netguard.SetAllowNonPublicForTest(true)
 }
 
 type connCounter struct {
@@ -202,8 +202,8 @@ func TestNonPublicAddressesAreNeverContacted(t *testing.T) {
 	if r := crawlOne(target{domain: host, ip: "127.0.0.1"}); r.note != "blocked:non-public-address" {
 		t.Fatalf("want blocked note, got %+v", r)
 	}
-	netguard.AllowNonPublic = false
-	defer func() { netguard.AllowNonPublic = true }()
+	netguard.SetAllowNonPublicForTest(false)
+	defer func() { netguard.SetAllowNonPublicForTest(true) }()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if _, err := fetchWebsiteInfo(ctx, host, "", "", "", nil); !errors.Is(err, netguard.ErrNotPublic) {

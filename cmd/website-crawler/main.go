@@ -890,6 +890,34 @@ func main() {
 	if _, err := db.Exec(`ALTER TABLE domain_info ADD COLUMN IF NOT EXISTS dns_fail_count INT NOT NULL DEFAULT 0`); err != nil {
 		log.Printf("ensure dns_fail_count: %v", err)
 	}
+	// T2: OPIC scoring (streaming PageRank). Each domain holds "cash"; crawling
+	// distributes it to outlinks, resets to zero, and accumulates "history".
+	// Score = history + cash; the frontier orders by score DESC.
+	if _, err := db.Exec(`ALTER TABLE domain_info ADD COLUMN IF NOT EXISTS opic_cash REAL NOT NULL DEFAULT 1.0`); err != nil {
+		log.Printf("ensure opic_cash: %v", err)
+	}
+	if _, err := db.Exec(`ALTER TABLE domain_info ADD COLUMN IF NOT EXISTS opic_history REAL NOT NULL DEFAULT 0`); err != nil {
+		log.Printf("ensure opic_history: %v", err)
+	}
+	// #81: Use CREATE INDEX CONCURRENTLY — plain CREATE INDEX takes ACCESS EXCLUSIVE
+	// on domain_info (13M rows), blocking the crawler for minutes. CONCURRENTLY
+	// builds without blocking reads/writes. It cannot run in a transaction block,
+	// but db.Exec here is autocommit (not tx.Exec), so this is safe.
+	// A failed prior CONCURRENTLY leaves an INVALID index; detect and rebuild it.
+	var idxValid *bool
+	_ = db.QueryRow(`SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_domain_info_opic_score'::regclass`).Scan(&idxValid)
+	if idxValid != nil && !*idxValid {
+		log.Printf("ensure idx_domain_info_opic_score: dropping INVALID index for rebuild")
+		if _, err := db.Exec(`DROP INDEX idx_domain_info_opic_score`); err != nil {
+			log.Printf("ensure idx_domain_info_opic_score drop: %v", err)
+		}
+		idxValid = nil // force rebuild below
+	}
+	if idxValid == nil {
+		if _, err := db.Exec(`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_domain_info_opic_score ON domain_info ((opic_history + opic_cash) DESC) WHERE web_crawled_at IS NULL AND dns_fail_count < 3`); err != nil {
+			log.Printf("ensure idx_domain_info_opic_score: %v", err)
+		}
+	}
 	delStmt, err := db.Prepare(`DELETE FROM website_info WHERE domain = $1`)
 	if err != nil {
 		log.Fatalf("prepare delete: %v", err)
@@ -1083,13 +1111,16 @@ type frontierSnapshot struct {
 
 var frontierSnap frontierSnapshot
 
-// loadFrontier reads the whole frontier (newest first, capped at max rows) with its breaker group key.
+// loadFrontier reads the whole frontier (highest OPIC score first, capped at
+// max rows) with its breaker group key. T2: OPIC ordering replaces the old
+// newest-first order — domains that accumulate cash from inlinks (i.e. sites
+// many others link to) are crawled before isolated ones.
 func loadFrontier(db *sql.DB, max int) ([]target, []string, error) {
 	rows, err := db.Query(`SELECT d.domain, coalesce(btrim(split_part(d.ip_addresses_ipv4, ',', 1)), ''), coalesce(a.org, '')
 		  FROM domain_info d
 		  LEFT JOIN asninfo a ON a.ip = nullif(btrim(split_part(d.ip_addresses_ipv4, ',', 1)), '')
 		 WHERE d.web_crawled_at IS NULL AND d.dns_fail_count < 3
-		 ORDER BY d.id DESC LIMIT $1`, max)
+		 ORDER BY (d.opic_history + d.opic_cash) DESC, d.id DESC LIMIT $1`, max)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1107,7 +1138,9 @@ func loadFrontier(db *sql.DB, max int) ([]target, []string, error) {
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
-	rand.Shuffle(len(ts), func(i, j int) { ts[i], ts[j] = ts[j], ts[i]; keys[i], keys[j] = keys[j], keys[i] })
+	// T2: no shuffle — the OPIC score order IS the priority. Diversity across
+	// breaker groups is enforced downstream by draw()'s maxPerGroup caps and
+	// capBatch's de-clustering.
 	return ts, keys, nil
 }
 
@@ -1881,6 +1914,32 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 			if ra, e := res.RowsAffected(); e == nil {
 				discovered = int(ra)
 			}
+		}
+	}
+
+	// T2: OPIC cash distribution. For each successfully crawled domain, spread
+	// its cash across its outlink domains, then reset its cash to zero and
+	// accumulate history. Runs in the same transaction as the discovery emit.
+	{
+		sources := make(map[string][]string)
+		for _, b := range batch {
+			if b.info.outDomains == nil || len(b.info.outDomains) == 0 {
+				continue
+			}
+			// Only distribute from successfully crawled pages (not 304s, which
+			// carry no outlink information).
+			if b.notmod || b.bad || b.ferr != nil {
+				continue
+			}
+			outs := make([]string, 0, len(b.info.outDomains))
+			for d := range b.info.outDomains {
+				outs = append(outs, d)
+			}
+			sort.Strings(outs)
+			sources[b.domain] = outs
+		}
+		if err := opicDistribute(ctx, tx, sources); err != nil {
+			return 0, err
 		}
 	}
 

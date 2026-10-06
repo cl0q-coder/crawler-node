@@ -127,31 +127,51 @@ func TestCapBatchEnforcesPerGroupCap(t *testing.T) {
 	}
 }
 
-// TestCapBatchShufflesAdmission: the cap must not always take the first N
-// pool entries (which would starve the tail forever).
-func TestCapBatchShufflesAdmission(t *testing.T) {
-	seenFirst := map[string]int{}
-	// 200 runs, not 20: with 5-from-40 uniform admission, P(a given entry is
-	// never admitted in 20 runs) = (7/8)^20 ≈ 7% — a flake, not a signal.
-	// At 200 runs that drops to (7/8)^200 ≈ 1.6e-12. A broken (unshuffled)
-	// capBatch still fails deterministically: s0 would be admitted 200/200.
-	const runs = 200
-	for run := 0; run < runs; run++ {
-		var ts []target
-		for i := 0; i < 40; i++ {
-			ts = append(ts, target{domain: fmt.Sprintf("s%d.example.com", i), org: "ShuffleASN"})
-		}
-		for _, g := range capBatch(ts, 5, 100) {
-			seenFirst[g.domain]++
+// TestCapBatchScoreOrder: admission follows the pool's score order (OPIC
+// priority, #105). The pool arrives OPIC-score-ordered from the DB; capBatch
+// admits the top maxPerGroup per group deterministically. De-clustering is
+// preserved by the cap, not by shuffling.
+// TestCapBatchTurnover: the tail is not starved forever — once admitted
+// targets leave the pool (crawled and stamped), the next tier is admitted on
+// the following pass. Anti-starvation is a system-level property (pool
+// turnover per batch), not a per-batch shuffle.
+func TestCapBatchScoreOrder(t *testing.T) {
+	var ts []target
+	for i := 0; i < 40; i++ {
+		ts = append(ts, target{domain: fmt.Sprintf("s%d.example.com", i), org: "ScoreASN"})
+	}
+	got := capBatch(ts, 5, 100)
+	if len(got) != 5 {
+		t.Fatalf("capBatch admitted %d, want 5 (cap binds)", len(got))
+	}
+	for i, g := range got {
+		want := fmt.Sprintf("s%d.example.com", i)
+		if g.domain != want {
+			t.Errorf("admitted[%d] = %s, want %s (score order)", i, g.domain, want)
 		}
 	}
-	// With shuffling, across 200 runs of 5-from-40, the first pool entry
-	// should NOT appear every time, and the last should appear sometimes.
-	if seenFirst["s0.example.com"] == runs {
-		t.Error("s0 admitted in all 200 runs — admission is not shuffled, tail starves")
+}
+
+func TestCapBatchTurnover(t *testing.T) {
+	var ts []target
+	for i := 0; i < 40; i++ {
+		ts = append(ts, target{domain: fmt.Sprintf("s%d.example.com", i), org: "TurnoverASN"})
 	}
-	if seenFirst["s39.example.com"] == 0 {
-		t.Error("s39 never admitted in 200 runs — admission is not shuffled, tail starves")
+	// First pass admits s0..s4; simulate them leaving the pool (crawled).
+	first := capBatch(ts, 5, 100)
+	admitted := map[string]bool{}
+	for _, g := range first {
+		admitted[g.domain] = true
+	}
+	var rest []target
+	for _, x := range ts {
+		if !admitted[x.domain] {
+			rest = append(rest, x)
+		}
+	}
+	second := capBatch(rest, 5, 100)
+	if len(second) != 5 || second[0].domain != "s5.example.com" {
+		t.Errorf("second pass admitted %v, want s5..s9 (tail advances)", second)
 	}
 }
 

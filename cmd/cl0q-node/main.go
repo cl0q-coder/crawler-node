@@ -148,6 +148,11 @@ func main() {
 		runEnrollCommand(os.Args[2:])
 		return
 	}
+	// OP2: `cl0q-node status` — operator snapshot (queries METRICS_ADDR).
+	if len(os.Args) > 1 && os.Args[1] == "status" {
+		runStatusCommand(os.Args[2:])
+		return
+	}
 	flag.Parse()
 	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)

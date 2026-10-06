@@ -93,10 +93,25 @@ func opicDistribute(ctx context.Context, tx *sql.Tx, sources map[string][]string
 			dests = append(dests, d)
 			amts = append(amts, a)
 		}
+		// Sort destinations so the UPDATE below takes row locks in a
+		// deterministic order: map iteration order is random, and taking
+		// locks in random order inside this tx is a deadlock risk (every
+		// other domain_info write in the codebase is already sorted for
+		// exactly this reason).
+		order := make([]int, len(dests))
+		for i := range order {
+			order[i] = i
+		}
+		sort.Slice(order, func(i, j int) bool { return dests[order[i]] < dests[order[j]] })
+		sd := make([]string, len(dests))
+		sa := make([]float64, len(amts))
+		for i, k := range order {
+			sd[i], sa[i] = dests[k], amts[k]
+		}
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE domain_info di SET opic_cash = di.opic_cash + t.total
 			FROM (SELECT d, SUM(a) AS total FROM unnest($1::text[], $2::float[]) AS t(d, a) GROUP BY d) t
-			WHERE di.domain = t.d`, pq.Array(dests), pq.Array(amts)); err != nil {
+			WHERE di.domain = t.d`, pq.Array(sd), pq.Array(sa)); err != nil {
 			return err
 		}
 	}

@@ -55,7 +55,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -1250,12 +1249,12 @@ func scanTargets(rows *sql.Rows, withInfra bool) ([]target, error) {
 	return out, rows.Err()
 }
 
-// capBatch de-clusters the enriched pool: shuffle, then admit at most maxPerGroup targets
+// capBatch de-clusters the enriched pool: walk it IN ORDER (OPIC score order
+// from the frontier — the priority), admit at most maxPerGroup targets
 // per group (ASN org → IP → registrable parent), skip groups whose breaker is open, and
 // dedup domains — up to maxReturn total. This stops one busy/blocked ASN from monopolizing
 // a batch (the insert-dip root cause) and yields a diverse, healthy work set.
 func capBatch(ts []target, maxPerGroup, maxReturn int) []target {
-	rand.Shuffle(len(ts), func(i, j int) { ts[i], ts[j] = ts[j], ts[i] })
 	if maxReturn < 1 {
 		maxReturn = len(ts)
 	}
@@ -1504,7 +1503,8 @@ func crawlContinuous(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, wo
 				}
 				continue
 			}
-			rand.Shuffle(len(targets), func(i, j int) { targets[i], targets[j] = targets[j], targets[i] })
+			// Feed workers in OPIC score order from the frontier (the priority);
+			// shuffling here used to neutralize T2 OPIC priority.
 			fed := 0
 			for _, t := range targets {
 				if _, dup := inflight.LoadOrStore(t.domain, struct{}{}); dup {

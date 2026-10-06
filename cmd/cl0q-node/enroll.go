@@ -136,6 +136,7 @@ func runEnrollCommand(args []string) {
 // following a 3xx would leak it to the redirect target. A 3xx response is
 // returned as-is so the caller sees the refusal.
 var enrollClient = &http.Client{
+	Timeout: 30 * time.Second,
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	},

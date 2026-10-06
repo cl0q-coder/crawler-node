@@ -841,8 +841,9 @@ func main() {
 			domain, title, description, keywords, canonical, h1, status_code, content_type,
 			content_length, latency_ms, redirects, outbound_links, image_count, word_count,
 			charset, robots, og_title, og_image, twitter_card, page_language, server_header,
-			fetch_error, etag, last_modified, crawled_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,NOW())
+			fetch_error, etag, last_modified, simhash, simhash_b0, simhash_b1, simhash_b2,
+			simhash_b3, duplicate_of, crawled_at)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,NOW())
 		ON CONFLICT (domain) DO UPDATE SET
 			title=EXCLUDED.title, description=EXCLUDED.description, keywords=EXCLUDED.keywords,
 			canonical=EXCLUDED.canonical, h1=EXCLUDED.h1, status_code=EXCLUDED.status_code,
@@ -2038,6 +2039,8 @@ func flushRowByRow(batch []crawlOut, upsert, delStmt, stampStmt, emitStmt, touch
 				in.OutboundLinkCount, in.ImageCount, in.WordCount, ns(in.Charset), ns(in.Robots),
 				ns(in.OGTitle), ns(in.OGImage), ns(in.TwitterCard), ns(in.PageLanguage), ns(in.ServerHeader),
 				b.ferr, ns(in.ETag), ns(in.LastModified),
+				int64(in.SimHash), int16(simhash.Blocks(in.SimHash)[0]), int16(simhash.Blocks(in.SimHash)[1]),
+				int16(simhash.Blocks(in.SimHash)[2]), int16(simhash.Blocks(in.SimHash)[3]), ns(in.DuplicateOf),
 			); err != nil {
 				// A failed upsert stored NO content — do NOT fall through to the web_crawled_at
 				// stamp below, or this row is hidden from re-crawl for RECRAWL_DAYS. Leave it

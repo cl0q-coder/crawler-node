@@ -880,8 +880,24 @@ func main() {
 	if _, err := db.Exec(`ALTER TABLE domain_info ADD COLUMN IF NOT EXISTS opic_history REAL NOT NULL DEFAULT 0`); err != nil {
 		log.Printf("ensure opic_history: %v", err)
 	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_domain_info_opic_score ON domain_info ((opic_history + opic_cash) DESC) WHERE web_crawled_at IS NULL AND dns_fail_count < 3`); err != nil {
-		log.Printf("ensure idx_domain_info_opic_score: %v", err)
+	// #81: Use CREATE INDEX CONCURRENTLY — plain CREATE INDEX takes ACCESS EXCLUSIVE
+	// on domain_info (13M rows), blocking the crawler for minutes. CONCURRENTLY
+	// builds without blocking reads/writes. It cannot run in a transaction block,
+	// but db.Exec here is autocommit (not tx.Exec), so this is safe.
+	// A failed prior CONCURRENTLY leaves an INVALID index; detect and rebuild it.
+	var idxValid *bool
+	_ = db.QueryRow(`SELECT indisvalid FROM pg_index WHERE indexrelid = 'idx_domain_info_opic_score'::regclass`).Scan(&idxValid)
+	if idxValid != nil && !*idxValid {
+		log.Printf("ensure idx_domain_info_opic_score: dropping INVALID index for rebuild")
+		if _, err := db.Exec(`DROP INDEX idx_domain_info_opic_score`); err != nil {
+			log.Printf("ensure idx_domain_info_opic_score drop: %v", err)
+		}
+		idxValid = nil // force rebuild below
+	}
+	if idxValid == nil {
+		if _, err := db.Exec(`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_domain_info_opic_score ON domain_info ((opic_history + opic_cash) DESC) WHERE web_crawled_at IS NULL AND dns_fail_count < 3`); err != nil {
+			log.Printf("ensure idx_domain_info_opic_score: %v", err)
+		}
 	}
 	delStmt, err := db.Prepare(`DELETE FROM website_info WHERE domain = $1`)
 	if err != nil {

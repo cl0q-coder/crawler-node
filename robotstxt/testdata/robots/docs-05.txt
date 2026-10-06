@@ -1,0 +1,17 @@
+# Fixture docs-05: synthetic docs site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /feed/
+Disallow: /staging/
+Disallow: /preview/
+Disallow: /admin/
+Disallow: /*.asp$
+Disallow: /*token*
+Allow: /contact
+Allow: /search/help
+Allow: /blog/*.html$
+Allow: /public/
+Allow: /search/help
+Allow: /wp-content/uploads/
+

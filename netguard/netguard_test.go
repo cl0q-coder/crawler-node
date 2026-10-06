@@ -67,7 +67,7 @@ func TestDialRefusesLoopback(t *testing.T) {
 }
 
 func TestControlWrapsBadAddress(t *testing.T) {
-	allowNonPublic = false
+	allowNonPublic.Store(false)
 	if err := Control("tcp", "no-port-here", nil); !errors.Is(err, ErrNotPublic) {
 		t.Fatalf("an unparseable address must be refused with ErrNotPublic, got %v", err)
 	}

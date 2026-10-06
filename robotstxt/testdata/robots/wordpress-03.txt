@@ -1,0 +1,35 @@
+# Fixture wordpress-03: synthetic wordpress site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: cl0q-node
+Disallow: /maintenance/
+Disallow: /dev/
+Disallow: /blog/drafts/
+Disallow: /register
+Disallow: /cgi-bin/
+Disallow: /staff/
+Disallow: /search/
+Disallow: /config/
+Disallow: /search/
+Disallow: /staff/
+Disallow: /*sessionid*
+Disallow: /*.exe$
+Disallow: /*sessionid*
+Disallow: /node/*
+Disallow: /*?
+Disallow: /*?q=*
+Allow: /blog/
+Allow: /blog/*.html$
+Allow: /about
+Allow: /assets/
+
+User-agent: *
+Disallow: /register
+Disallow: /logs/
+Disallow: /embed/
+Disallow: /staff/
+Disallow: /*?replytocom=*
+Crawl-delay: 10
+
+Sitemap: https://example.com/sitemap.xml
+Sitemap: https://example.com/sitemap-news.xml

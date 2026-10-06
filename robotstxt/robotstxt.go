@@ -47,6 +47,10 @@ type rule struct {
 	allow bool
 	plen  int
 	pat   wildcard
+	// prefix is set when the pattern has no * wildcard and no $ anchor:
+	// matching is a plain strings.HasPrefix, skipping the wildcard matcher
+	// entirely. Empty means "use pat".
+	prefix string
 }
 
 // wildcard is a pre-split robots path pattern. The pattern is start-anchored;
@@ -147,8 +151,13 @@ func Parse(body string) *Rules {
 			}
 		case "allow", "disallow":
 			if cur != nil && val != "" && nRules < MaxRules {
+				rl := rule{allow: field == "allow", plen: len(val)}
+				if pre, ok := plainPrefix(val); ok {
+					rl.prefix = pre
+				}
 				if pat, ok := compileWildcard(escapePattern(val)); ok {
-					cur.rules = append(cur.rules, rule{allow: field == "allow", plen: len(val), pat: pat})
+					rl.pat = pat
+					cur.rules = append(cur.rules, rl)
 					nRules++
 				}
 				// Rules exceeding MaxWildcardsPerRule are skipped (fail-open).
@@ -179,6 +188,18 @@ func Parse(body string) *Rules {
 	return out
 }
 
+// plainPrefix reports whether p is a plain path prefix — no * wildcard and no
+// $ end anchor — in which case matching is exactly strings.HasPrefix. The
+// returned prefix is percent-encoded exactly like escapePattern does, because
+// Allows() matches against u.EscapedPath(); a raw non-ASCII prefix would never
+// match an encoded path (e.g. "/café" vs "/caf%C3%A9").
+func plainPrefix(p string) (string, bool) {
+	if strings.Contains(p, "*") || strings.HasSuffix(p, "$") {
+		return "", false
+	}
+	return escapePattern(p), true
+}
+
 // escapePattern canonicalizes a robots path pattern the way Google's reference
 // parser does (RFC 9309: matching happens against the percent-encoded path,
 // and Allows() feeds patterns u.EscapedPath()): UTF-8 multibyte sequences are
@@ -186,6 +207,18 @@ func Parse(body string) *Rules {
 // Without this, a rule like "Disallow: /café" could never match, because the
 // path under test arrives as "/caf%C3%A9".
 func escapePattern(p string) string {
+	// Fast path: pure ASCII with no '%' needs no escaping — return as-is,
+	// zero allocations. This is the common case for AllowsPath probes.
+	clean := true
+	for i := 0; i < len(p); i++ {
+		if p[i] == '%' || p[i] >= 0x80 {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return p
+	}
 	var b strings.Builder
 	b.Grow(len(p))
 	for i := 0; i < len(p); i++ {
@@ -230,6 +263,8 @@ func (r *Rules) Allows(u *url.URL) bool {
 }
 
 // AllowsPath reports whether a path such as "/" or "/a/b?x=1" may be fetched.
+// The path is percent-encoded exactly like patterns are, so raw non-ASCII
+// paths and mixed-case hex encodings match consistently.
 func (r *Rules) AllowsPath(p string) bool {
 	if r == nil {
 		return true
@@ -237,9 +272,16 @@ func (r *Rules) AllowsPath(p string) bool {
 	if p == "" {
 		p = "/"
 	}
+	p = escapePattern(p)
 	best, allow := -1, true
 	for _, rl := range r.rules {
-		if rl.plen >= best && rl.pat.match(p) && (rl.plen > best || rl.allow) {
+		var matched bool
+		if rl.prefix != "" {
+			matched = strings.HasPrefix(p, rl.prefix)
+		} else {
+			matched = rl.pat.match(p)
+		}
+		if rl.plen >= best && matched && (rl.plen > best || rl.allow) {
 			best, allow = rl.plen, rl.allow
 		}
 	}

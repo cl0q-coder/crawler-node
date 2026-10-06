@@ -1,0 +1,29 @@
+# Fixture wordpress-08: synthetic wordpress site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: cl0q-discovery
+Disallow: /install/
+Disallow: /user/
+Disallow: /support/tickets/
+Disallow: /cart/
+Disallow: /maintenance/
+Disallow: /feed/
+Disallow: /maintenance/
+Disallow: /maintenance/
+Disallow: /old/
+Disallow: /*?replytocom=*
+Disallow: /search*
+Disallow: /search$
+Allow: /wp-admin/admin-ajax.php
+Allow: /docs/
+Allow: /wp-admin/admin-ajax.php
+Allow: /sitemap.xml
+Allow: /wp-admin/admin-ajax.php
+
+User-agent: *
+Disallow: /cgi-bin/
+Disallow: /wp-includes/
+Disallow: /old/
+Disallow: /user/
+Allow: /blog/*.html$
+

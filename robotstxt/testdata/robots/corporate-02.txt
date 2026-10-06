@@ -1,0 +1,22 @@
+# Fixture corporate-02: synthetic corporate site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: cl0q-discovery
+Disallow: /wp-content/plugins/
+Disallow: /embed/
+Disallow: /support/tickets/
+Disallow: /blog/drafts/
+Disallow: /blog/drafts/
+Disallow: /*.exe$
+Disallow: /*.exe$
+Disallow: /feed$
+Disallow: /feed$
+Allow: /docs/*
+Allow: /contact
+Crawl-delay: 30
+
+User-agent: *
+Disallow: /account/
+Disallow: /cgi-bin/
+Disallow: /private/
+

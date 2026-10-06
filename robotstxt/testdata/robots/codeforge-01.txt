@@ -1,0 +1,27 @@
+# Fixture codeforge-01: synthetic codeforge site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: cl0q-node
+Disallow: /feed/
+Disallow: /preview/
+Disallow: /members/
+Disallow: /drafts/
+Disallow: /download/private/
+Disallow: /checkout/
+Disallow: /staff/
+Disallow: /user/*/followers
+Disallow: /user/*/followers
+Disallow: /*?replytocom=*
+Disallow: /*?replytocom=*
+Disallow: /private$
+Disallow: /index.html$
+Allow: /assets/*.css
+Allow: /assets/*.css
+
+User-agent: *
+Disallow: /maintenance/
+Disallow: /config/
+Disallow: /maintenance/
+Disallow: /*?sid=*
+Allow: /docs/
+

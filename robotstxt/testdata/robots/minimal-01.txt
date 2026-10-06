@@ -1,0 +1,13 @@
+# Fixture minimal-01: synthetic minimal site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /config/
+Disallow: /wp-admin/
+Disallow: /feed/
+Disallow: /install/
+Disallow: /user/*/followers
+Disallow: /index.html$
+Allow: /sitemap.xml
+Crawl-delay: 2
+

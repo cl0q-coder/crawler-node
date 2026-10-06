@@ -1,0 +1,17 @@
+# Fixture docs-02: synthetic docs site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /maintenance/
+Disallow: /support/tickets/
+Disallow: /dev/
+Disallow: /*token*
+Disallow: /private$
+Allow: /about
+Allow: /assets/*.css
+Allow: /sitemap.xml
+Allow: /images/
+Allow: /public/*
+Allow: /wp-content/uploads/
+
+Sitemap: https://example.com/sitemap.xml

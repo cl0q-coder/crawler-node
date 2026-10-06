@@ -1,0 +1,16 @@
+# Fixture minimal-04: synthetic minimal site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: cl0q-discovery
+Disallow: /cart/
+Disallow: /maintenance/
+Disallow: /old/
+Disallow: /*.exe$
+Disallow: /*?s=*
+Crawl-delay: 5
+
+User-agent: *
+Disallow: /drafts/
+Crawl-delay: 2
+
+Sitemap: https://example.com/sitemap.xml

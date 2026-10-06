@@ -1,0 +1,23 @@
+# Fixture news-07: synthetic news site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /wp-admin/
+Disallow: /login
+Disallow: /staff/
+Disallow: /maintenance/
+Disallow: /wp-admin/
+Disallow: /tmp/
+Disallow: /*sort=*
+Disallow: /*?s=*
+Disallow: /*calendar*
+Disallow: /*.exe$
+Disallow: /index.html$
+Disallow: /private$
+Disallow: /private$
+Allow: /assets/*.css
+Allow: /wp-content/uploads/
+Allow: /docs/*
+Allow: /blog/
+
+Sitemap: https://example.com/sitemap.xml

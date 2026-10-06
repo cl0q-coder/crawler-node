@@ -1,0 +1,28 @@
+# Fixture forum-05: synthetic forum site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: ia_archiver
+Disallow: /members/
+Disallow: /cart/
+Disallow: /intranet/
+Disallow: /user/
+Disallow: /wp-admin/
+Disallow: /embed/
+Disallow: /old/
+Disallow: /blog/drafts/
+Disallow: /*token*
+Disallow: /*token*
+Disallow: /node/*
+Disallow: /*?sid=*
+Disallow: /login$
+Disallow: /private$
+Allow: /wp-admin/admin-ajax.php
+Allow: /images/
+
+User-agent: *
+Disallow: /images/tmp/
+Disallow: /blog/drafts/
+Allow: /blog/
+
+Sitemap: https://example.com/sitemap.xml
+Sitemap: https://example.com/sitemap-news.xml

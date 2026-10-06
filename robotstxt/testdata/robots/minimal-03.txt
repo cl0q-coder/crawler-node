@@ -1,0 +1,13 @@
+# Fixture minimal-03: synthetic minimal site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: DuckDuckBot
+Disallow: /members/
+Disallow: /old/
+Allow: /public/*
+
+User-agent: *
+Disallow: /embed/
+Crawl-delay: 1
+
+Sitemap: https://example.com/sitemap.xml

@@ -1,0 +1,32 @@
+# Fixture codeforge-04: synthetic codeforge site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: cl0q-node
+Disallow: /user/
+Disallow: /old/
+Disallow: /install/
+Disallow: /api/internal/
+Disallow: /admin/
+Disallow: /backup/
+Disallow: /account/
+Disallow: /login
+Disallow: /intranet/
+Disallow: /private/
+Disallow: /images/tmp/
+Disallow: /*?
+Disallow: /*/print/
+Disallow: /*token*
+Disallow: /*/print/
+Disallow: /index.html$
+Allow: /api/public/
+Allow: /search/help
+
+User-agent: *
+Disallow: /dev/
+Disallow: /images/tmp/
+Disallow: /cart/
+Disallow: /*?replytocom=*
+Crawl-delay: 30
+
+Sitemap: https://example.com/sitemap.xml
+Sitemap: https://example.com/sitemap-news.xml

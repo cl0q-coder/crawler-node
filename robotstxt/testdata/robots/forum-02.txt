@@ -1,0 +1,31 @@
+# Fixture forum-02: synthetic forum site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: Slurp
+Disallow: /preview/
+Disallow: /members/
+Disallow: /drafts/
+Disallow: /checkout/
+Disallow: /drafts/
+Disallow: /preview/
+Disallow: /maintenance/
+Disallow: /intranet/
+Disallow: /cgi-bin/
+Disallow: /maintenance/
+Disallow: /node/*
+Disallow: /*.exe$
+Disallow: /*?q=*
+Disallow: /*?
+Disallow: /search$
+Disallow: /login$
+Allow: /search/help
+Crawl-delay: 30
+
+User-agent: *
+Disallow: /config/
+Disallow: /blog/drafts/
+Disallow: /*?q=*
+Allow: /wp-admin/admin-ajax.php
+
+Sitemap: https://example.com/sitemap.xml
+Sitemap: https://example.com/sitemap-news.xml

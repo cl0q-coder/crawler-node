@@ -1,0 +1,19 @@
+# Fixture corporate-06: synthetic corporate site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /private/
+Disallow: /dev/
+Disallow: /members/
+Disallow: /api/internal/
+Disallow: /install/
+Disallow: /search/
+Disallow: /*.php$
+Disallow: /*token*
+Disallow: /index.html$
+Allow: /docs/*
+Allow: /about
+Allow: /public/*
+Crawl-delay: 2
+
+Sitemap: https://example.com/sitemap.xml

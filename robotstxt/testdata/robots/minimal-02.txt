@@ -1,0 +1,14 @@
+# Fixture minimal-02: synthetic minimal site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: Googlebot
+Disallow: /intranet/
+Disallow: /api/internal/
+Allow: /images/
+Crawl-delay: 2
+
+User-agent: *
+Disallow: /dev/
+Crawl-delay: 5
+
+Sitemap: https://example.com/sitemap.xml

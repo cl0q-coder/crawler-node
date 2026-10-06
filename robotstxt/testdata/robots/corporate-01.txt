@@ -1,0 +1,21 @@
+# Fixture corporate-01: synthetic corporate site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /config/
+Disallow: /checkout/
+Disallow: /dev/
+Disallow: /download/private/
+Disallow: /config/
+Disallow: /drafts/
+Disallow: /*/print/
+Disallow: /*?q=*
+Disallow: /*calendar*
+Allow: /blog/*.html$
+Allow: /wp-admin/admin-ajax.php
+Allow: /assets/*.css
+Allow: /blog/*.html$
+Allow: /assets/
+
+Sitemap: https://example.com/sitemap.xml
+Sitemap: https://example.com/sitemap-news.xml

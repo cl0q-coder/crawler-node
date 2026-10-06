@@ -1,0 +1,24 @@
+# Fixture codeforge-05: synthetic codeforge site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /cgi-bin/
+Disallow: /tmp/
+Disallow: /admin/
+Disallow: /api/internal/
+Disallow: /preview/
+Disallow: /private/
+Disallow: /members/
+Disallow: /*.asp$
+Disallow: /*?sid=*
+Disallow: /*?
+Disallow: /node/*
+Disallow: /*?sid=*
+Disallow: /*?page=*
+Disallow: /index.html$
+Allow: /images/
+Allow: /contact
+Allow: /public/*
+Allow: /docs/*
+
+Sitemap: https://example.com/sitemap.xml

@@ -1,0 +1,28 @@
+# Fixture ecommerce-03: synthetic ecommerce site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: facebot
+Disallow: /logs/
+Disallow: /config/
+Disallow: /embed/
+Disallow: /support/tickets/
+Disallow: /intranet/
+Disallow: /maintenance/
+Disallow: /wp-admin/
+Disallow: /tmp/
+Disallow: /amp/*
+Disallow: /*sessionid*
+Disallow: /*sessionid*
+Disallow: /*.asp$
+Disallow: /search$
+Disallow: /private$
+Allow: /public/
+Allow: /docs/
+
+User-agent: *
+Disallow: /admin/
+Disallow: /checkout/
+Disallow: /intranet/
+Allow: /docs/
+
+Sitemap: https://example.com/sitemap.xml

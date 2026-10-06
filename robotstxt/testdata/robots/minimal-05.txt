@@ -1,0 +1,13 @@
+# Fixture minimal-05: synthetic minimal site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /user/
+Disallow: /preview/
+Disallow: /download/private/
+Disallow: /user/*/followers
+Disallow: /index.html$
+Allow: /public/
+Crawl-delay: 2
+
+Sitemap: https://example.com/sitemap.xml

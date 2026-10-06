@@ -1,0 +1,29 @@
+# Fixture codeforge-03: synthetic codeforge site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: facebot
+Disallow: /staging/
+Disallow: /staff/
+Disallow: /backup/
+Disallow: /feed/
+Disallow: /support/tickets/
+Disallow: /user/
+Disallow: /backup/
+Disallow: /private/
+Disallow: /cart/
+Disallow: /search/
+Disallow: /*?page=*
+Disallow: /*token*
+Disallow: /*.asp$
+Disallow: /node/*
+Disallow: /login$
+Allow: /wp-content/uploads/
+Allow: /public/*
+
+User-agent: *
+Disallow: /account/
+Disallow: /search/
+Disallow: /*?replytocom=*
+
+Sitemap: https://example.com/sitemap.xml
+Sitemap: https://example.com/sitemap-news.xml

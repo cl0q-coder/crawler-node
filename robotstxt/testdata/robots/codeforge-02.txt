@@ -1,0 +1,25 @@
+# Fixture codeforge-02: synthetic codeforge site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /install/
+Disallow: /api/internal/
+Disallow: /old/
+Disallow: /download/private/
+Disallow: /user/
+Disallow: /backup/
+Disallow: /embed/
+Disallow: /support/tickets/
+Disallow: /images/tmp/
+Disallow: /*token*
+Disallow: /user/*/followers
+Disallow: /*.asp$
+Disallow: /*token*
+Disallow: /user/*/followers
+Disallow: /*?q=*
+Disallow: /search$
+Allow: /images/
+Allow: /blog/
+Allow: /images/
+Allow: /blog/*.html$
+

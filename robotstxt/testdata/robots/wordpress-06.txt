@@ -1,0 +1,20 @@
+# Fixture wordpress-06: synthetic wordpress site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /config/
+Disallow: /logs/
+Disallow: /cgi-bin/
+Disallow: /intranet/
+Disallow: /admin/
+Disallow: /cgi-bin/
+Disallow: /config/
+Disallow: /*?page=*
+Disallow: /*.exe$
+Disallow: /*sessionid*
+Disallow: /api/*key*
+Disallow: /*utm_*
+Disallow: /*sort=*
+Allow: /about
+Allow: /images/
+

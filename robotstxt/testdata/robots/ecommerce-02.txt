@@ -1,0 +1,26 @@
+# Fixture ecommerce-02: synthetic ecommerce site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /images/tmp/
+Disallow: /config/
+Disallow: /maintenance/
+Disallow: /preview/
+Disallow: /wp-includes/
+Disallow: /cgi-bin/
+Disallow: /api/internal/
+Disallow: /cart/
+Disallow: /staff/
+Disallow: /download/private/
+Disallow: /*/print/
+Disallow: /amp/*
+Disallow: /*/print/
+Disallow: /api/*key*
+Disallow: /*.asp$
+Disallow: /api/*key*
+Disallow: /search*
+Disallow: /private$
+Allow: /wp-admin/admin-ajax.php
+Allow: /public/
+Crawl-delay: 1
+

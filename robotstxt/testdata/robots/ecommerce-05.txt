@@ -1,0 +1,33 @@
+# Fixture ecommerce-05: synthetic ecommerce site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: cl0q-discovery
+Disallow: /download/private/
+Disallow: /feed/
+Disallow: /user/
+Disallow: /user/
+Disallow: /api/internal/
+Disallow: /register
+Disallow: /wp-content/plugins/
+Disallow: /checkout/
+Disallow: /*.asp$
+Disallow: /*sessionid*
+Disallow: /*?s=*
+Disallow: /node/*
+Disallow: /*utm_*
+Disallow: /*?sid=*
+Disallow: /*?page=*
+Disallow: /index.html$
+Allow: /assets/*.css
+Allow: /wp-content/uploads/
+Allow: /public/*
+Allow: /about
+Allow: /blog/*.html$
+
+User-agent: *
+Disallow: /drafts/
+Disallow: /private/
+Disallow: /cgi-bin/
+Disallow: /*?sid=*
+
+Sitemap: https://example.com/sitemap.xml

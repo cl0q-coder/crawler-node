@@ -106,7 +106,14 @@ dropped but is **not** a strike.
 `POST /api/ingest/website` and `POST /api/ingest/domains`.
 Body: `{"rows": [...]}` — at most 2000 rows per request, `Content-Type:
 application/json`, `User-Agent: Mozilla/5.0 (compatible; cl0q-node/1.0;
-operator=<node-id>; +https://cl0q.com/bot)`.
+operator=<node-id-prefix>; +https://cl0q.com/bot)`.
+
+`<node-id-prefix>` is the **first 8 characters** of the node_id. The full
+node_id never appears in a public User-Agent: combined with the
+refresh_secret requirement in §1, a harvested prefix is useless for
+rotation, while site operators can still identify the node family in
+their logs and block it with one robots.txt group (`User-agent:
+cl0q-node`).
 
 ### website_info row
 

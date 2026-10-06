@@ -79,7 +79,6 @@ import (
 	"golang.org/x/net/html/charset"
 	"golang.org/x/net/publicsuffix"
 
-	"cl0q/botid"
 	"cl0q/crawlutil"
 	"cl0q/dbresil"
 	"cl0q/internal/config"
@@ -730,7 +729,7 @@ func main() {
 	// the worker count, is what bounds the load on any one server.
 	workers := clampInt(envInt("WORKERS", 16), 1, 64)
 	dialSem = make(chan struct{}, clampInt(envInt("MAX_CONNS", 48), 1, 256)) // concurrent HTTP dials
-	userAgent = botid.MustUserAgent()                                        // fixed: names the node operator
+	userAgent = config.PublicUserAgent()                                     // truncated operator prefix, PROTOCOL.md §4
 	fetchTimeout = time.Duration(clampInt(envInt("FETCH_TIMEOUT_MS", 20000), 2000, 60000)) * time.Millisecond
 	dbConns := clampInt(envInt("DB_MAXCONNS", 10), 1, 50)
 	loadPoliteness() // pacing, retries and circuit breaker, clamped to the politeness floors

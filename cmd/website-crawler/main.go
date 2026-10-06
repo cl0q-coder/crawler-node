@@ -85,6 +85,7 @@ import (
 	"cl0q/internal/footprint"
 	"cl0q/internal/metrics"
 	"cl0q/internal/simhash"
+	"cl0q/internal/sitemap"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -217,7 +218,8 @@ var fpChecker *footprint.Checker // NR3: nil until main() opens the DB
 
 // NR6: observability. Initialized in main(); nil in tests that don't call it.
 var mreg *metrics.Registry
-var mCrawledOK, mCrawledFailed, mCrawledSkipped, mCrawledChallenged, mCrawledUnchanged, mCrawledDeferred, mCrawledBlocked, mCrawledDuplicates *atomic.Int64
+var mCrawledOK, mCrawledFailed, mCrawledSkipped, mCrawledChallenged, mCrawledUnchanged, mCrawledDeferred, mCrawledBlocked, mCrawledDuplicates, mSitemapFound *atomic.Int64
+var sitemapFetch bool
 var mBreakerOpen *atomic.Int64
 
 var (
@@ -382,6 +384,8 @@ type WebsiteInfo struct {
 	ETag, LastModified                             string          // HTTP validators captured on a 200; stored so the next recrawl can send a conditional GET
 	SimHash                                        uint64          // IG2: SimHash fingerprint for near-duplicate detection (0 = not computed)
 	DuplicateOf                                    string          // IG2: domain of the near-duplicate original ("" if unique)
+	SitemapURLs                                    int             // IG3: URLs found in sitemap.xml (0 = none/not fetched)
+	SitemapLastMod                                 time.Time       // IG3: latest lastmod from sitemap (zero = none)
 	outDomains                                     map[string]bool // external domains seen on the page (for discovery emit; not persisted as a column)
 	Challenge                                      string          // anti-bot vendor if this was an interstitial, not the real page (not a column → routed to fetch_error)
 	NotModified                                    bool            // server answered 304 to our conditional GET → content unchanged (not a column → routed to a crawled_at-only touch)
@@ -769,7 +773,8 @@ func main() {
 	// only a few DB conns regardless of worker count. Keep the pool small to stay
 	// well clear of the shared 100-conn budget (was workers+16 = 48).
 	db.SetMaxOpenConns(dbConns)
-	fpChecker = footprint.New(db) // NR3: bounded footprint
+	fpChecker = footprint.New(db)                  // NR3: bounded footprint
+	sitemapFetch = envBool("SITEMAP_FETCH", false) // IG3: fetch /sitemap.xml for recrawl signals (opt-in, doubles requests)
 	// NR6: observability.
 	mreg = metrics.NewRegistry()
 	mCrawledOK = mreg.Counter("crawler_pages_ok_total", "pages successfully crawled")
@@ -778,6 +783,7 @@ func main() {
 	mCrawledChallenged = mreg.Counter("crawler_pages_challenged_total", "pages behind a bot challenge")
 	mCrawledUnchanged = mreg.Counter("crawler_pages_unchanged_total", "pages unchanged (304)")
 	mCrawledDuplicates = mreg.Counter("crawler_pages_duplicates_total", "IG2: pages detected as near-duplicates (SimHash)")
+	mSitemapFound = mreg.Counter("crawler_sitemaps_found_total", "IG3: sitemaps successfully parsed")
 	mCrawledDeferred = mreg.Counter("crawler_pages_deferred_total", "pages deferred by ASN/IP backoff")
 	mCrawledBlocked = mreg.Counter("crawler_pages_blocked_total", "pages blocked by blacklist")
 	mBreakerOpen = mreg.Counter("crawler_breaker_opens_total", "times the ASN/IP breaker opened a cooldown")
@@ -868,6 +874,7 @@ func main() {
 			fetch_error=EXCLUDED.fetch_error, etag=EXCLUDED.etag, last_modified=EXCLUDED.last_modified,
 	simhash=EXCLUDED.simhash, simhash_b0=EXCLUDED.simhash_b0, simhash_b1=EXCLUDED.simhash_b1,
 	simhash_b2=EXCLUDED.simhash_b2, simhash_b3=EXCLUDED.simhash_b3, duplicate_of=EXCLUDED.duplicate_of,
+	sitemap_urls=EXCLUDED.sitemap_urls, sitemap_lastmod=EXCLUDED.sitemap_lastmod,
 			crawled_at=NOW(),
 			-- This crawler re-authored the row, so it reclaims provenance (like the batch
 			-- upsertTail). Without it, a row re-crawled via the row-by-row FALLBACK keeps a stale
@@ -1681,6 +1688,77 @@ const upsertHead = `INSERT INTO website_info (domain,title,description,keywords,
 // IG2: findDuplicate checks if a SimHash fingerprint is a near-duplicate of an
 // existing page. Uses the block-index technique: near-dupes (distance <= 3)
 // share at least one 16-bit block. Returns the duplicate domain, or "".
+// IG3: fetchSitemap tries to fetch and parse /sitemap.xml for a domain.
+// Returns URL count and latest lastmod. Returns (0, zero) on any failure.
+// Opt-in via SITEMAP_FETCH (doubles requests when enabled).
+func fetchSitemap(ctx context.Context, domain string) (int, time.Time) {
+	if !sitemapFetch {
+		return 0, time.Time{}
+	}
+	// P1 SSRF fix: use the guarded client (netguard.Control via transport)
+	// instead of a bare http.Client. A sitemap URL or redirect to
+	// 169.254.169.254 / 10.x / 127.0.0.1 must be refused at dial time.
+	client := newClient()
+	// Try https first, then http.
+	for _, scheme := range []string{"https", "http"} {
+		sitemapURL := scheme + "://" + domain + "/sitemap.xml"
+		req, err := http.NewRequestWithContext(ctx, "GET", sitemapURL, nil)
+		if err != nil {
+			continue
+		}
+		req.Header.Set("User-Agent", userAgent)
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 10<<20))
+		resp.Body.Close()
+		if err != nil || resp.StatusCode != 200 {
+			continue
+		}
+		urls, sitemapURLs, isIndex, err := sitemap.Parse(bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		if isIndex && len(sitemapURLs) > 0 {
+			// Fetch the first child sitemap (bounded).
+			return fetchSitemapURL(ctx, sitemapURLs[0])
+		}
+		if len(urls) > 0 {
+			minc(mSitemapFound)
+			return len(urls), sitemap.LatestLastMod(urls)
+		}
+	}
+	return 0, time.Time{}
+}
+
+// fetchSitemapURL fetches and parses a single sitemap URL.
+func fetchSitemapURL(ctx context.Context, sitemapURL string) (int, time.Time) {
+	// P1 SSRF fix: guarded client (see fetchSitemap).
+	client := newClient()
+	req, err := http.NewRequestWithContext(ctx, "GET", sitemapURL, nil)
+	if err != nil {
+		return 0, time.Time{}
+	}
+	req.Header.Set("User-Agent", userAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, time.Time{}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return 0, time.Time{}
+	}
+	urls, _, _, err := sitemap.Parse(io.LimitReader(resp.Body, 10<<20))
+	if err != nil {
+		return 0, time.Time{}
+	}
+	if len(urls) > 0 {
+		minc(mSitemapFound)
+	}
+	return len(urls), sitemap.LatestLastMod(urls)
+}
+
 func findDuplicate(ctx context.Context, db *sql.DB, fp uint64) string {
 	if fp == 0 {
 		return ""
@@ -2091,6 +2169,14 @@ func ns(s string) interface{} {
 	return s
 }
 
+// nullableTime returns nil for zero time, else the time (for SQL NULL).
+func nullableTime(t time.Time) interface{} {
+	if t.IsZero() {
+		return nil
+	}
+	return t
+}
+
 // emitDomains inserts the external domains found on a crawled page into domain_info
 // (skipping ones already present), reusing the fetch the crawler already did.
 // Returns how many NEW domains were inserted. Capped per page to bound the array.
@@ -2293,6 +2379,13 @@ func crawlOneURL(ctx context.Context, db *sql.DB, rawURL string) (*WebsiteInfo, 
 	info, host, err := fetchOneURLInfo(ctx, rawURL)
 	if err != nil {
 		return nil, err
+	}
+	// IG3: opt-in sitemap fetch for recrawl signals.
+	if sitemapFetch && info.StatusCode == 200 {
+		if n, lm := fetchSitemap(ctx, host); n > 0 {
+			info.SitemapURLs = n
+			info.SitemapLastMod = lm
+		}
 	}
 	batch := []crawlOut{{domain: host, info: *info}}
 	if _, err := flushBatchTx(ctx, db, batch, false, false); err != nil {

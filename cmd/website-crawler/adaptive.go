@@ -20,6 +20,9 @@ const (
 
 // t3NextInterval returns the new recrawl interval in days given the current
 // interval and whether the page changed. A current <= 0 means unset.
+// t3NextInterval is the Go reference implementation of the T3 adaptive interval
+// logic. NOTE: prod uses the SQL implementation (see recrawl interval logic in
+// main.go picked query); this Go version exists for parity testing only.
 func t3NextInterval(current float64, changed bool, def float64) float64 {
 	if current <= 0 {
 		current = def

@@ -830,21 +830,29 @@ func main() {
 	mCrawledBlocked = mreg.Counter("crawler_pages_blocked_total", "pages blocked by blacklist")
 	mBreakerOpen = mreg.Counter("crawler_breaker_opens_total", "times the ASN/IP breaker opened a cooldown")
 	mSitemapURLs = mreg.Counter("crawler_sitemap_urls_total", "T1: domains discovered via sitemaps")
-	mreg.GaugeFunc("crawler_frontier_depth", "uncrawled domains in domain_info", func() int64 {
-		var n int64
-		_ = db.QueryRow(`SELECT count(*) FROM domain_info WHERE web_crawled_at IS NULL`).Scan(&n)
-		return n
-	})
-	mreg.GaugeFunc("crawler_db_domains", "rows in domain_info", func() int64 {
-		var n int64
-		_ = db.QueryRow(`SELECT count(*) FROM domain_info`).Scan(&n)
-		return n
-	})
-	mreg.GaugeFunc("crawler_db_pages", "rows in website_info", func() int64 {
-		var n int64
-		_ = db.QueryRow(`SELECT count(*) FROM website_info`).Scan(&n)
-		return n
-	})
+	// cachedCount runs the query at most once per 60s; gauges scrape often
+	// and COUNT(*) on 13M+ row tables is expensive.
+	cachedCount := func(key, query string) func() int64 {
+		var mu sync.Mutex
+		var last time.Time
+		var val int64
+		return func() int64 {
+			mu.Lock()
+			defer mu.Unlock()
+			if time.Since(last) < 60*time.Second {
+				return val
+			}
+			_ = db.QueryRow(query).Scan(&val)
+			last = time.Now()
+			return val
+		}
+	}
+	mreg.GaugeFunc("crawler_frontier_depth", "uncrawled domains in domain_info",
+		cachedCount("frontier", `SELECT count(*) FROM domain_info WHERE web_crawled_at IS NULL`))
+	mreg.GaugeFunc("crawler_db_domains", "rows in domain_info",
+		cachedCount("domains", `SELECT count(*) FROM domain_info`))
+	mreg.GaugeFunc("crawler_db_pages", "rows in website_info",
+		cachedCount("pages", `SELECT count(*) FROM website_info`))
 	mreg.GaugeFunc("crawler_breaker_open_groups", "groups currently in breaker cooldown", func() int64 {
 		var n int64
 		breaker.m.Range(func(_, _ any) bool { n++; return true })
@@ -1134,7 +1142,7 @@ func selectTargets(db *sql.DB) ([]target, error) {
 		picked = fmt.Sprintf(`
 			(SELECT domain, coalesce(btrim(split_part(ip_addresses_ipv4, ',', 1)), '') AS ip
 			   FROM domain_info TABLESAMPLE SYSTEM (%g) WHERE web_crawled_at IS NULL AND dns_fail_count < 3 LIMIT %d)
-			UNION
+			UNION ALL
 			(SELECT domain, coalesce(btrim(split_part(ip_addresses_ipv4, ',', 1)), '') AS ip
 			   FROM domain_info WHERE web_crawled_at < NOW() - INTERVAL '%d days' AND dns_fail_count < 3 LIMIT %d)`, samplePct, pool, recrawl, pool)
 	} else {
@@ -1144,7 +1152,7 @@ func selectTargets(db *sql.DB) ([]target, error) {
 			(SELECT di.domain, coalesce(btrim(split_part(di.ip_addresses_ipv4, ',', 1)), '') AS ip
 			   FROM domain_info di TABLESAMPLE SYSTEM (%g) LEFT JOIN website_info wi ON di.domain = wi.domain
 			   WHERE wi.domain IS NULL AND di.dns_fail_count < 3 LIMIT %d)
-			UNION
+			UNION ALL
 			(SELECT domain, ''::text AS ip
 			   FROM website_info WHERE crawled_at < NOW() - INTERVAL '%d days' LIMIT %d)`, samplePct, pool, recrawl, pool)
 	}
@@ -1809,6 +1817,71 @@ func fetchSitemapURL(ctx context.Context, sitemapURL string) (int, time.Time) {
 	return len(urls), sitemap.LatestLastMod(urls)
 }
 
+// findDuplicatesBatch checks a batch of simhashes for near-duplicates in a
+// single query, instead of N+1 per-item queries. Returns map[fp]duplicateDomain.
+// Collects all block values across the batch, queries once with ANY($1..$4),
+// then does the Hamming check in Go.
+func findDuplicatesBatch(ctx context.Context, db *sql.DB, fps []uint64) map[uint64]string {
+	out := make(map[uint64]string)
+	if len(fps) == 0 {
+		return out
+	}
+	// Collect unique non-zero fps
+	seen := make(map[uint64]bool)
+	var uniq []uint64
+	for _, fp := range fps {
+		if fp != 0 && !seen[fp] {
+			seen[fp] = true
+			uniq = append(uniq, fp)
+		}
+	}
+	if len(uniq) == 0 {
+		return out
+	}
+	// Collect all block values
+	var b0, b1, b2, b3 []int16
+	for _, fp := range uniq {
+		blocks := simhash.Blocks(fp)
+		b0 = append(b0, int16(blocks[0]))
+		b1 = append(b1, int16(blocks[1]))
+		b2 = append(b2, int16(blocks[2]))
+		b3 = append(b3, int16(blocks[3]))
+	}
+	rows, err := db.QueryContext(ctx, `
+		SELECT domain, simhash FROM website_info
+		WHERE simhash_b0 = ANY($1) OR simhash_b1 = ANY($2)
+		   OR simhash_b2 = ANY($3) OR simhash_b3 = ANY($4)
+		LIMIT 1000`,
+		pq.Array(b0), pq.Array(b1), pq.Array(b2), pq.Array(b3))
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	type cand struct {
+		domain string
+		hash   uint64
+	}
+	var cands []cand
+	for rows.Next() {
+		var c cand
+		var stored int64
+		if err := rows.Scan(&c.domain, &stored); err == nil {
+			c.hash = uint64(stored)
+			cands = append(cands, c)
+		}
+	}
+	// Hamming check in Go
+	for _, fp := range uniq {
+		for _, c := range cands {
+			if simhash.IsDuplicate(fp, c.hash) {
+				out[fp] = c.domain
+				break
+			}
+		}
+	}
+	return out
+}
+
 func findDuplicate(ctx context.Context, db *sql.DB, fp uint64) string {
 	if fp == 0 {
 		return ""
@@ -1956,6 +2029,14 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 
 	good := make([]crawlOut, 0, len(batch))
 	var bad, notmod, all []string
+	// IG2: batch near-duplicate check (single query, not N+1).
+	var simhashes []uint64
+	for _, b := range batch {
+		if !b.bad && !b.notmod && b.info.SimHash != 0 {
+			simhashes = append(simhashes, b.info.SimHash)
+		}
+	}
+	dupMap := findDuplicatesBatch(ctx, db, simhashes)
 	for _, b := range batch {
 		all = append(all, b.domain)
 		switch {
@@ -1966,7 +2047,7 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 		default:
 			// IG2: check for near-duplicates before storing.
 			if b.info.SimHash != 0 {
-				if dup := findDuplicate(ctx, db, b.info.SimHash); dup != "" && dup != b.domain {
+				if dup, ok := dupMap[b.info.SimHash]; ok && dup != "" && dup != b.domain {
 					b.info.DuplicateOf = dup
 					minc(mCrawledDuplicates)
 				}
@@ -2404,7 +2485,12 @@ func crawlOne(t target) result {
 			if wait <= 0 {
 				wait = time.Duration(attempt+1) * time.Second // no Retry-After header: linear backoff
 			}
-			time.Sleep(wait)
+			// Ctx-aware sleep: don't block shutdown for 15s on a throttled retry.
+			select {
+			case <-ctx.Done():
+				return result{domain: domain, err: ctx.Err()}
+			case <-time.After(wait):
+			}
 			ipThrottle(t.ip) // the retry is a request like any other
 			sitePace(domain, ri.delay)
 			continue
@@ -2967,7 +3053,10 @@ func parseHTMLInfo(root *html.Node, info *WebsiteInfo, domain string) {
 										if !crawlSubdomains.Load() {
 											emit = reg
 										}
-										info.outDomains[emit] = true
+										// Cap outDomains at 4096 to bound memory on link-farm pages.
+										if len(info.outDomains) < 4096 {
+											info.outDomains[emit] = true
+										}
 									}
 								}
 							}
@@ -3106,6 +3195,10 @@ func textOf(n *html.Node) string {
 }
 
 // robotsInfo is the cached-per-host robots.txt verdict (package robotstxt decides which group applies).
+// errThrottled signals a 429/503 from robots.txt: the server is rate-limiting.
+// The page fetch should be deferred, not treated as allowed.
+var errThrottled = errors.New("throttled: robots returned 429/503")
+
 type robotsInfo struct {
 	allowed  bool             // the homepage "/" may be fetched
 	delay    time.Duration    // Crawl-delay, capped at robotstxt.MaxCrawlDelay
@@ -3166,6 +3259,11 @@ func fetchRobots(domain, ip string) robotsInfo {
 		}
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, robotstxt.MaxBytes))
 		resp.Body.Close()
+		if resp.StatusCode == 429 || resp.StatusCode == 503 {
+			// Throttle signal: server is rate-limiting or overloaded.
+			// Defer the page fetch; do NOT proceed as if robots were absent.
+			return robotsInfo{allowed: false, blockErr: errThrottled}
+		}
 		if resp.StatusCode >= 400 {
 			return robotsInfo{allowed: true} // no robots / not found -> allowed
 		}

@@ -2612,16 +2612,20 @@ func parseHTMLInfo(root *html.Node, info *WebsiteInfo, domain string) {
 								info.OutboundLinkCount++
 								// Collect valid registrable domains for the discovery emit (skip IPs, bare public suffixes,
 								// schemeless junk like mailto:/tel:, and over-long hosts).
+								// Registrable is computed once: it walks the public-suffix trie, so calling it
+								// twice per link (check + fold) doubles that cost.
 								if (u.Scheme == "" || u.Scheme == "http" || u.Scheme == "https") &&
-									len(host) <= 253 && crawlutil.Registrable(host) != "" {
-									// Apex-only: FOLD a subdomain to its registrable site (blog.acme.com → acme.com,
-									// news.nation.co.ke → nation.co.ke) instead of dropping it — captures the parent apex
-									// (breadth) without the fan-out: one apex per family, deduped by the outDomains set.
-									emit := host
-									if !crawlSubdomains.Load() {
-										emit = crawlutil.Registrable(host)
+									len(host) <= 253 {
+									if reg := crawlutil.Registrable(host); reg != "" {
+										// Apex-only: FOLD a subdomain to its registrable site (blog.acme.com → acme.com,
+										// news.nation.co.ke → nation.co.ke) instead of dropping it — captures the parent apex
+										// (breadth) without the fan-out: one apex per family, deduped by the outDomains set.
+										emit := host
+										if !crawlSubdomains.Load() {
+											emit = reg
+										}
+										info.outDomains[emit] = true
 									}
-									info.outDomains[emit] = true
 								}
 							}
 						}

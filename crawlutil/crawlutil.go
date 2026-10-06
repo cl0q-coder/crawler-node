@@ -31,12 +31,35 @@ func icannSuffix(h string) string {
 	return s
 }
 
+// ipLiteralChars reports whether h consists solely of characters that can
+// appear in an IP literal (hex digits, dots, colons). Typical DNS names
+// contain other letters, so this lets callers skip the expensive net.ParseIP
+// for the common case; anything that looks IP-ish still gets the real parse,
+// so semantics are unchanged.
+func ipLiteralChars(h string) bool {
+	for i := 0; i < len(h); i++ {
+		c := h[i]
+		if c != '.' && c != ':' &&
+			!(c >= '0' && c <= '9') &&
+			!(c >= 'a' && c <= 'f') &&
+			!(c >= 'A' && c <= 'F') {
+			return false
+		}
+	}
+	return true
+}
+
 // Registrable returns the registrable site a host belongs to: blog.acme.com → acme.com, a.bbc.co.uk → bbc.co.uk,
 // nation.co.ke → nation.co.ke, foo.blogspot.com → blogspot.com. It returns "" for a host that is itself a public
 // suffix (co.ke, com), an IP address or a single label, none of which is a site.
 func Registrable(host string) string {
 	h := normalize(host)
-	if h == "" || net.ParseIP(h) != nil || !strings.Contains(h, ".") {
+	if h == "" || !strings.Contains(h, ".") {
+		return ""
+	}
+	// net.ParseIP is the hottest allocation in the crawl path (it is tried
+	// for every outbound host); skip it unless h even looks like an IP.
+	if ipLiteralChars(h) && net.ParseIP(h) != nil {
 		return ""
 	}
 	s := icannSuffix(h)

@@ -1,0 +1,26 @@
+# Fixture news-05: synthetic news site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /staging/
+Disallow: /cart/
+Disallow: /logs/
+Disallow: /staging/
+Disallow: /preview/
+Disallow: /cart/
+Disallow: /register
+Disallow: /old/
+Disallow: /blog/drafts/
+Disallow: /preview/
+Disallow: /staging/
+Disallow: /*.asp$
+Disallow: /*.php$
+Disallow: /amp/*
+Disallow: /*.asp$
+Disallow: /*token*
+Disallow: /*.exe$
+Disallow: /*calendar*
+Disallow: /private$
+Allow: /public/*
+Allow: /assets/*.css
+

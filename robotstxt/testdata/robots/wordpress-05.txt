@@ -1,0 +1,29 @@
+# Fixture wordpress-05: synthetic wordpress site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: Baiduspider
+Disallow: /drafts/
+Disallow: /images/tmp/
+Disallow: /preview/
+Disallow: /preview/
+Disallow: /images/tmp/
+Disallow: /feed/
+Disallow: /support/tickets/
+Disallow: /cart/
+Disallow: /*.php$
+Disallow: /api/*key*
+Disallow: /*?
+Disallow: /*sort=*
+Disallow: /user/*/followers
+Allow: /assets/*.css
+Allow: /about
+Allow: /images/
+
+User-agent: *
+Disallow: /wp-includes/
+Disallow: /blog/drafts/
+Disallow: /blog/drafts/
+Disallow: /staging/
+Disallow: /*?q=*
+Crawl-delay: 1
+

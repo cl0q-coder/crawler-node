@@ -12,7 +12,6 @@ package botid
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"regexp"
 	"strings"
@@ -31,6 +30,18 @@ const (
 
 var idRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,31}$`)
 
+// knownAgents are the robots.txt user-agent tokens that address cl0q nodes.
+// Per RFC 9309 §2.2.2, matching is prefix-based: a User-agent line binds any
+// crawler whose product token starts with the line value (case-insensitive).
+var knownAgents = []string{
+	Product, // cl0q-node
+	"cl0q-crawler",
+	"cl0q-discovery",
+	"cl0q-favicon",
+	"cl0q-favicon-grabber", // former name of cl0q-favicon
+	"cl0q",
+}
+
 // UserAgent builds the User-Agent for the given node id (2–32 chars of a-z, 0-9, '-' and '_').
 func UserAgent(nodeID string) (string, error) {
 	if !idRE.MatchString(nodeID) {
@@ -39,27 +50,45 @@ func UserAgent(nodeID string) (string, error) {
 	return fmt.Sprintf("Mozilla/5.0 (compatible; %s/%s; operator=%s; +%s)", Product, Version, nodeID, InfoURL), nil
 }
 
-// MustUserAgent reads CL0Q_NODE_ID and returns the User-Agent, or exits: a node must never crawl anonymously.
-func MustUserAgent() string {
+// UserAgentFromEnv reads CL0Q_NODE_ID and returns the User-Agent, or an
+// error: a node must never crawl anonymously, but a library must not call
+// os.Exit on its host — the caller decides how to handle a missing or
+// invalid node id.
+func UserAgentFromEnv() (string, error) {
 	id := strings.TrimSpace(os.Getenv(EnvNodeID))
 	if id == "" {
-		log.Fatalf("%s is not set. Every request a node makes names its operator; use the node id you were given "+
-			"when you enrolled (see docs/CRAWLER_NODES.md).", EnvNodeID)
+		return "", fmt.Errorf("%s is not set. Every request a node makes names its operator; use the node id you were given "+
+			"when you enrolled (see docs/CRAWLER_NODES.md)", EnvNodeID)
 	}
-	ua, err := UserAgent(id)
+	return UserAgent(id)
+}
+
+// MustUserAgent reads CL0Q_NODE_ID and returns the User-Agent, panicking if
+// the node id is missing or invalid (standard Must semantics: recoverable,
+// unlike os.Exit — the caller can recover if it wants to keep running).
+func MustUserAgent() string {
+	ua, err := UserAgentFromEnv()
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 	return ua
 }
 
-// IsOurs reports whether a robots.txt User-agent value addresses cl0q nodes. Besides cl0q-node it accepts the
-// names of cl0q's own bots (cl0q-crawler, cl0q-discovery, cl0q-favicon and its former name cl0q-favicon-grabber)
+// IsOurs reports whether a robots.txt User-agent value addresses cl0q nodes.
+// Per RFC 9309 §2.2.2, matching is prefix-based: a User-agent line binds any
+// crawler whose product token starts with the line value (case-insensitive).
+// Besides cl0q-node it accepts the names of cl0q's own bots (cl0q-crawler,
+// cl0q-discovery, cl0q-favicon and its former name cl0q-favicon-grabber)
 // and plain "cl0q", so a rule a site wrote for any cl0q bot also binds every node.
 func IsOurs(agent string) bool {
-	switch strings.ToLower(strings.TrimSpace(agent)) {
-	case Product, "cl0q-crawler", "cl0q-discovery", "cl0q-favicon", "cl0q-favicon-grabber", "cl0q":
-		return true
+	agent = strings.ToLower(strings.TrimSpace(agent))
+	if agent == "" {
+		return false
+	}
+	for _, known := range knownAgents {
+		if strings.HasPrefix(known, agent) {
+			return true
+		}
 	}
 	return false
 }

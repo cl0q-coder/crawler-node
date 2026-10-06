@@ -1,0 +1,23 @@
+# Fixture forum-03: synthetic forum site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: cl0q-crawler
+Disallow: /wp-admin/
+Disallow: /private/
+Disallow: /backup/
+Disallow: /download/private/
+Disallow: /register
+Disallow: /*?
+Disallow: /*/print/
+Disallow: /api/*key*
+Allow: /blog/
+Allow: /about
+Allow: /api/public/
+
+User-agent: *
+Disallow: /wp-admin/
+Disallow: /wp-includes/
+Allow: /blog/
+Crawl-delay: 2
+
+Sitemap: https://example.com/sitemap.xml

@@ -1,0 +1,12 @@
+# Fixture minimal-06: synthetic minimal site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /config/
+Disallow: /checkout/
+Disallow: /embed/
+Disallow: /feed/
+Disallow: /*.exe$
+Disallow: /login$
+
+Sitemap: https://example.com/sitemap.xml

@@ -1,0 +1,23 @@
+# Fixture ecommerce-01: synthetic ecommerce site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /api/internal/
+Disallow: /old/
+Disallow: /tmp/
+Disallow: /images/tmp/
+Disallow: /staff/
+Disallow: /admin/
+Disallow: /install/
+Disallow: /images/tmp/
+Disallow: /account/
+Disallow: /*.exe$
+Disallow: /*/print/
+Disallow: /node/*
+Disallow: /feed$
+Disallow: /login$
+Allow: /assets/
+Allow: /assets/*.css
+Allow: /assets/*.css
+
+Sitemap: https://example.com/sitemap.xml

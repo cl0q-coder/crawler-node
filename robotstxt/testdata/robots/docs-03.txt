@@ -1,0 +1,18 @@
+# Fixture docs-03: synthetic docs site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /feed/
+Disallow: /config/
+Disallow: /staff/
+Disallow: /preview/
+Disallow: /register
+Disallow: /feed$
+Allow: /assets/*.css
+Allow: /search/help
+Allow: /docs/*
+Allow: /api/public/
+Allow: /wp-admin/admin-ajax.php
+
+Sitemap: https://example.com/sitemap.xml
+Sitemap: https://example.com/sitemap-news.xml

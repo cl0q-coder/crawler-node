@@ -1,0 +1,17 @@
+# Fixture forum-04: synthetic forum site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /logs/
+Disallow: /cgi-bin/
+Disallow: /admin/
+Disallow: /staff/
+Disallow: /user/
+Disallow: /tmp/
+Disallow: /api/internal/
+Disallow: /admin/
+Disallow: /*?replytocom=*
+Disallow: /*?sid=*
+Allow: /blog/*.html$
+Allow: /wp-content/uploads/
+

@@ -1,0 +1,17 @@
+# Fixture docs-01: synthetic docs site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /staging/
+Disallow: /search/
+Disallow: /api/internal/
+Disallow: /tmp/
+Disallow: /wp-includes/
+Disallow: /user/*/followers
+Disallow: /*token*
+Allow: /assets/
+Allow: /about
+Allow: /public/*
+Allow: /assets/*.css
+Crawl-delay: 1
+

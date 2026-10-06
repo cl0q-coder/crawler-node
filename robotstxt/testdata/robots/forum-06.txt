@@ -1,0 +1,23 @@
+# Fixture forum-06: synthetic forum site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /maintenance/
+Disallow: /account/
+Disallow: /tmp/
+Disallow: /embed/
+Disallow: /preview/
+Disallow: /search/
+Disallow: /wp-content/plugins/
+Disallow: /login
+Disallow: /*.php$
+Disallow: /*sessionid*
+Disallow: /amp/*
+Disallow: /*/print/
+Disallow: /search$
+Disallow: /search$
+Allow: /images/
+Allow: /docs/
+Crawl-delay: 30
+
+Sitemap: https://example.com/sitemap.xml

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sync/atomic"
 	"syscall"
 )
 
@@ -23,21 +24,22 @@ var ErrNotPublic = errors.New("refusing to connect to a non-public address")
 // allowNonPublic turns the check off. It exists only for tests, which run fake
 // servers on 127.0.0.1; no crawler sets it, and there is no flag or environment
 // variable for it. Unexported: external packages must use SetAllowNonPublicForTest.
-var allowNonPublic bool
+// Atomic for safe concurrent access from parallel tests.
+var allowNonPublic atomic.Bool
 
 // SetAllowNonPublicForTest toggles the non-public-address guard. TEST ONLY —
 // it exists so integration tests in other packages can run fake servers on
 // 127.0.0.1. Do not call in production code; the guard is a security boundary.
-func SetAllowNonPublicForTest(v bool) { allowNonPublic = v }
+func SetAllowNonPublicForTest(v bool) { allowNonPublic.Store(v) }
 
 // GetAllowNonPublicForTest reports the guard state. TEST ONLY — paired with
 // SetAllowNonPublicForTest so tests can save and restore.
-func GetAllowNonPublicForTest() bool { return allowNonPublic }
+func GetAllowNonPublicForTest() bool { return allowNonPublic.Load() }
 
 // reservedPrefixes lists ranges that IsGlobalUnicast and IsPrivate don't already
-// exclude. It is the single source of truth: init derives the per-family prefix
-// lists and the first-octet / first-hextet lookup tables from it, so the fast
-// path in Public can never drift out of sync with the list.
+// exclude. It is the single source of truth: init derives the per-family
+// (network, mask) pairs and the first-octet / first-hextet lookup tables from
+// it, so the fast path in Public can never drift out of sync with the list.
 var reservedPrefixes = []string{
 	"0.0.0.0/8",       // "this network"
 	"100.64.0.0/10",   // carrier-grade NAT (also used by VPN overlay networks)
@@ -61,8 +63,18 @@ var reservedPrefixes = []string{
 }
 
 var (
-	reserved4 []netip.Prefix
-	reserved6 []netip.Prefix
+	// v4Net/v4Mask and v6NetHi/v6NetLo/v6MaskHi/v6MaskLo are the reserved
+	// prefixes as precomputed (network, mask) pairs: an address is inside
+	// the prefix iff (addr & mask) == net. This is exactly what
+	// netip.Prefix.Contains computes, but without its per-call masking
+	// overhead; the scan only runs for "maybe" addresses whose first
+	// octet/hextet is marked in the tables below.
+	v4Net    []uint32
+	v4Mask   []uint32
+	v6NetHi  []uint64
+	v6NetLo  []uint64
+	v6MaskHi []uint64
+	v6MaskLo []uint64
 	// firstOctetReserved marks IPv4 first octets covered by at least one
 	// reserved prefix; firstHextetReserved marks IPv6 first hextets. An address
 	// whose first octet/hextet is unmarked cannot be inside any reserved range,
@@ -75,13 +87,20 @@ func init() {
 	for _, s := range reservedPrefixes {
 		p := netip.MustParsePrefix(s)
 		if p.Addr().Is4() {
-			reserved4 = append(reserved4, p)
+			mb := p.Masked().Addr().As4()
+			v4Net = append(v4Net, uint32(mb[0])<<24|uint32(mb[1])<<16|uint32(mb[2])<<8|uint32(mb[3]))
+			v4Mask = append(v4Mask, ^uint32(0)<<(32-p.Bits()))
 			lo, hi := firstUnitRange(p.Bits(), 8, uint16(p.Masked().Addr().As4()[0]))
 			for o := int(lo); o <= int(hi); o++ {
 				firstOctetReserved[o] = true
 			}
 		} else {
-			reserved6 = append(reserved6, p)
+			mb := p.Masked().Addr().As16()
+			mhi, mlo := v6Mask(p.Bits())
+			v6NetHi = append(v6NetHi, be64(mb[:8]))
+			v6NetLo = append(v6NetLo, be64(mb[8:]))
+			v6MaskHi = append(v6MaskHi, mhi)
+			v6MaskLo = append(v6MaskLo, mlo)
 			b := p.Masked().Addr().As16()
 			base := uint16(b[0])<<8 | uint16(b[1])
 			lo, hi := firstUnitRange(p.Bits(), 16, base)
@@ -90,6 +109,21 @@ func init() {
 			}
 		}
 	}
+}
+
+// v6Mask returns the (high, low) 64-bit halves of a 128-bit mask with the top
+// bits set.
+func v6Mask(bits int) (uint64, uint64) {
+	if bits >= 64 {
+		return ^uint64(0), ^uint64(0) << (128 - bits)
+	}
+	return ^uint64(0) << (64 - bits), 0
+}
+
+// be64 reads 8 big-endian bytes as a uint64.
+func be64(b []byte) uint64 {
+	return uint64(b[0])<<56 | uint64(b[1])<<48 | uint64(b[2])<<40 | uint64(b[3])<<32 |
+		uint64(b[4])<<24 | uint64(b[5])<<16 | uint64(b[6])<<8 | uint64(b[7])
 }
 
 // firstUnitRange returns the range of first-octet (width 8) or first-hextet
@@ -112,8 +146,16 @@ func firstUnitRange(bits, width int, base uint16) (uint16, uint16) {
 // the SSRF guard while actually reaching an IPv4 host.
 var siitV6Prefix16 = [12]byte{0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff, 0, 0}
 
-// siitEmbeddedV4 reclassifies an SIIT-translated IPv6 address as the IPv4
-// address embedded in its low 32 bits.
+// v4CompatPrefix96 is the IPv4-compatible prefix ::/96 (RFC 2765): 96 zero
+// bits with an IPv4 address in the low 32 bits — e.g. ::127.0.0.1. Like the
+// SIIT spelling, Go's Addr.Unmap does not translate it, so it would look
+// like a global-unicast IPv6 address and slip through the SSRF guard while
+// actually reaching an IPv4 host on an RFC 2765 translator.
+var v4CompatPrefix96 = [12]byte{}
+
+// siitEmbeddedV4 reclassifies an SIIT-translated IPv6 address (RFC 6145) or an
+// IPv4-compatible IPv6 address (RFC 2765, ::/96) as the IPv4 address embedded
+// in its low 32 bits.
 func siitEmbeddedV4(a netip.Addr) (netip.Addr, bool) {
 	if !a.Is6() {
 		return netip.Addr{}, false
@@ -121,7 +163,7 @@ func siitEmbeddedV4(a netip.Addr) (netip.Addr, bool) {
 	b := a.As16()
 	var first12 [12]byte
 	copy(first12[:], b[:12])
-	if first12 != siitV6Prefix16 {
+	if first12 != siitV6Prefix16 && first12 != v4CompatPrefix96 {
 		return netip.Addr{}, false
 	}
 	return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}), true
@@ -136,8 +178,13 @@ func siitEmbeddedV4(a netip.Addr) (netip.Addr, bool) {
 // reservedPrefixes at init, so the fast path and the list cannot disagree;
 // every "maybe" address still gets the full scan, so verdicts are unchanged.
 func Public(a netip.Addr) bool {
-	if v4, ok := siitEmbeddedV4(a.WithZone("")); ok {
-		// SIIT-translated IPv6 (RFC 6145): classify the embedded IPv4.
+	// Strip any zone ID first: netip.Prefix.Contains returns false for
+	// zoned addresses, which would bypass the entire reserved-prefix scan.
+	// (P0: CVE-class SSRF bypass via e.g. 64:ff9b::a9fe:a9fe%eth0)
+	a = a.WithZone("")
+	if v4, ok := siitEmbeddedV4(a); ok {
+		// SIIT-translated (RFC 6145) or IPv4-compatible (RFC 2765, ::/96)
+		// IPv6: classify the embedded IPv4.
 		a = v4
 	} else {
 		a = a.Unmap()
@@ -149,8 +196,10 @@ func Public(a netip.Addr) bool {
 		if !firstOctetReserved[a.As4()[0]] {
 			return true
 		}
-		for _, p := range reserved4 {
-			if p.Contains(a) {
+		b := a.As4()
+		ip := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+		for i := range v4Net {
+			if ip&v4Mask[i] == v4Net[i] {
 				return false
 			}
 		}
@@ -160,8 +209,10 @@ func Public(a netip.Addr) bool {
 	if !firstHextetReserved[uint16(b[0])<<8|uint16(b[1])] {
 		return true
 	}
-	for _, p := range reserved6 {
-		if p.Contains(a) {
+	hi := be64(b[:8])
+	lo := be64(b[8:])
+	for i := range v6NetHi {
+		if hi&v6MaskHi[i] == v6NetHi[i] && lo&v6MaskLo[i] == v6NetLo[i] {
 			return false
 		}
 	}
@@ -178,7 +229,7 @@ func PublicIP(s string) bool {
 // resolved "ip:port" of each connection attempt. The address is parsed with netip.ParseAddrPort — one allocation-free
 // parse — rather than SplitHostPort followed by ParseAddr.
 func Control(network, address string, _ syscall.RawConn) error {
-	if allowNonPublic {
+	if allowNonPublic.Load() {
 		return nil
 	}
 	ap, err := netip.ParseAddrPort(address)

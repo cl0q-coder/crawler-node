@@ -1,0 +1,32 @@
+# Fixture news-06: synthetic news site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /wp-content/plugins/
+Disallow: /cgi-bin/
+Disallow: /wp-includes/
+Disallow: /private/
+Disallow: /support/tickets/
+Disallow: /tmp/
+Disallow: /account/
+Disallow: /private/
+Disallow: /cart/
+Disallow: /checkout/
+Disallow: /staff/
+Disallow: /*/print/
+Disallow: /*utm_*
+Disallow: /api/*key*
+Disallow: /*?
+Disallow: /*sort=*
+Disallow: /node/*
+Disallow: /private$
+Disallow: /feed$
+Disallow: /search$
+Allow: /docs/
+Allow: /search/help
+Allow: /api/public/
+Allow: /blog/*.html$
+Crawl-delay: 5
+
+Sitemap: https://example.com/sitemap.xml
+Sitemap: https://example.com/sitemap-news.xml

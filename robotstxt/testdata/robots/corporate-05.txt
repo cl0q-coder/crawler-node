@@ -1,0 +1,20 @@
+# Fixture corporate-05: synthetic corporate site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /intranet/
+Disallow: /private/
+Disallow: /dev/
+Disallow: /login
+Disallow: /cart/
+Disallow: /private/
+Disallow: /maintenance/
+Disallow: /cart/
+Disallow: /*.php$
+Disallow: /*.php$
+Disallow: /*.asp$
+Allow: /assets/
+Allow: /images/
+Allow: /blog/*.html$
+Allow: /api/public/
+

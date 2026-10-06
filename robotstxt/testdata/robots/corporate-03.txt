@@ -1,0 +1,18 @@
+# Fixture corporate-03: synthetic corporate site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /dev/
+Disallow: /logs/
+Disallow: /drafts/
+Disallow: /backup/
+Disallow: /*?page=*
+Disallow: /*?page=*
+Disallow: /node/*
+Disallow: /*?
+Allow: /docs/
+Allow: /about
+Allow: /docs/*
+
+Sitemap: https://example.com/sitemap.xml
+Sitemap: https://example.com/sitemap-news.xml

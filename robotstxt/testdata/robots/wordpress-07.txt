@@ -1,0 +1,31 @@
+# Fixture wordpress-07: synthetic wordpress site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /logs/
+Disallow: /wp-includes/
+Disallow: /old/
+Disallow: /support/tickets/
+Disallow: /dev/
+Disallow: /tmp/
+Disallow: /drafts/
+Disallow: /members/
+Disallow: /backup/
+Disallow: /private/
+Disallow: /embed/
+Disallow: /account/
+Disallow: /checkout/
+Disallow: /*?
+Disallow: /search*
+Disallow: /*?s=*
+Disallow: /*?
+Disallow: /*.exe$
+Disallow: /*.asp$
+Disallow: /search$
+Disallow: /index.html$
+Allow: /blog/
+Allow: /assets/*.css
+Allow: /blog/*.html$
+Allow: /assets/*.css
+
+Sitemap: https://example.com/sitemap.xml

@@ -1,0 +1,19 @@
+# Fixture docs-04: synthetic docs site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /intranet/
+Disallow: /preview/
+Disallow: /config/
+Disallow: /admin/
+Disallow: /*?page=*
+Disallow: /*token*
+Disallow: /*sessionid*
+Allow: /blog/*.html$
+Allow: /docs/
+Allow: /docs/
+Allow: /docs/*
+Allow: /search/help
+Crawl-delay: 10
+
+Sitemap: https://example.com/sitemap.xml

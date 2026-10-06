@@ -55,8 +55,12 @@ func TestMatcherEquivalence(t *testing.T) {
 			// Also verify AllowsPath agrees (integration check).
 			gotAllows := r.AllowsPath(p)
 			// AllowsPath returns !disallowed; pattern is a Disallow rule.
-			if gotAllows == gotNew {
-				t.Errorf("pattern %q path %q: AllowsPath=%v but match=%v — INCONSISTENT", tc.pattern, p, gotAllows, gotNew)
+			// Note: this repo's AllowsPath percent-encodes raw paths before
+			// matching (defense for direct callers), so compare the matcher
+			// against the escaped path — that is the contract AllowsPath
+			// actually implements.
+			if gotAllows == w.match(escapePattern(p)) {
+				t.Errorf("pattern %q path %q: AllowsPath=%v but match(escaped)=%v — INCONSISTENT", tc.pattern, p, gotAllows, w.match(escapePattern(p)))
 			}
 		}
 	}

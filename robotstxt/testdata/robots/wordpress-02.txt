@@ -1,0 +1,23 @@
+# Fixture wordpress-02: synthetic wordpress site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: *
+Disallow: /staging/
+Disallow: /cgi-bin/
+Disallow: /wp-includes/
+Disallow: /wp-includes/
+Disallow: /feed/
+Disallow: /members/
+Disallow: /checkout/
+Disallow: /dev/
+Disallow: /staff/
+Disallow: /*sort=*
+Disallow: /*?s=*
+Disallow: /feed$
+Allow: /sitemap.xml
+Allow: /public/*
+Allow: /docs/
+Allow: /docs/
+Allow: /blog/
+
+Sitemap: https://example.com/sitemap.xml

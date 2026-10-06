@@ -1,0 +1,38 @@
+# Fixture news-01: synthetic news site,
+# modeled on real-world robots.txt patterns (hand-written pools).
+
+User-agent: Bingbot
+Disallow: /tmp/
+Disallow: /members/
+Disallow: /backup/
+Disallow: /wp-admin/
+Disallow: /intranet/
+Disallow: /drafts/
+Disallow: /wp-includes/
+Disallow: /tmp/
+Disallow: /drafts/
+Disallow: /members/
+Disallow: /*utm_*
+Disallow: /*utm_*
+Disallow: /*?s=*
+Disallow: /*/print/
+Disallow: /amp/*
+Disallow: /*?replytocom=*
+Disallow: /*calendar*
+Disallow: /*?page=*
+Disallow: /private$
+Disallow: /search$
+Disallow: /index.html$
+Allow: /wp-admin/admin-ajax.php
+Allow: /docs/
+Allow: /assets/*.css
+Allow: /search/help
+Crawl-delay: 30
+
+User-agent: *
+Disallow: /user/
+Disallow: /wp-includes/
+Disallow: /cgi-bin/
+Disallow: /*sort=*
+
+Sitemap: https://example.com/sitemap.xml

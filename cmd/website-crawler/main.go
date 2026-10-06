@@ -199,6 +199,20 @@ var sitemapChecked sync.Map // domain -> unix seconds of last sitemap check
 
 const sitemapRecheckInterval = 24 * time.Hour
 
+// pruneSitemapChecked drops sitemapChecked entries older than
+// sitemapRecheckInterval, bounding the map to one entry per domain checked in
+// the last 24h. Without this the map grows one entry per crawled domain,
+// forever (the same leak class as the robotsCache leak of 2026-07-13).
+func pruneSitemapChecked() {
+	cutoff := time.Now().Add(-sitemapRecheckInterval).Unix()
+	sitemapChecked.Range(func(k, v any) bool {
+		if v.(int64) < cutoff {
+			sitemapChecked.Delete(k)
+		}
+		return true
+	})
+}
+
 // userAgent comes from botid: the good-bot form "Mozilla/5.0 (compatible; cl0q-node/1.0; operator=<id>; +<url>)".
 // It never forges a real browser build — that trips WAF "client inconsistency" rules and reads as a deceptive bot.
 var fpChecker *footprint.Checker // NR3: nil until main() opens the DB
@@ -1314,6 +1328,10 @@ func crawlBatch(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, targets
 	// GC thrash + box swap → throughput collapse, 2026-07-13). Reset it per batch; it only
 	// needs to dedup within a batch, which bounds it to this batch's domains.
 	robotsCache = sync.Map{}
+	// Prune sitemapChecked per batch too: entries older than the recheck
+	// interval are dead weight, and without pruning the map grows one entry
+	// per crawled domain forever.
+	pruneSitemapChecked()
 	// Prune breaker entries idle past ~2× the max cooldown so its map stays bounded to
 	// currently-relevant groups instead of accumulating one entry per ASN/IP/parent forever.
 	breaker.prune(2 * breaker.cap)
@@ -1478,6 +1496,10 @@ func crawlContinuous(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, wo
 			pruneGates(&hostGates, gateIdle)
 			pruneGates(&ipGates, gateIdle)
 			robotsCache.Clear()
+			// sitemapChecked never shrinks in PIPELINE mode (no batches), so
+			// prune it on the timer too; entries older than the recheck
+			// interval can never suppress a fetch again.
+			pruneSitemapChecked()
 			breaker.prune(2 * breaker.cap)
 			// Return idle heap to the OS (2026-08-25). The memstats instrumentation proved the RSS
 			// growth is NOT a code leak — heapInuse/heapObjects/goroutines oscillate and return to

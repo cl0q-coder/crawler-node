@@ -99,7 +99,8 @@ func TestPublicUserAgentForShortIDUnchanged(t *testing.T) {
 }
 
 func TestPublicUserAgentForRejectsBadInput(t *testing.T) {
-	for _, bad := range []string{"", "x", "ND-UPPER", "nd_under", "nd with space"} {
+	// Note: underscores are valid — botid allows them (server mints nd_-prefixed ids).
+	for _, bad := range []string{"", "x", "ND-UPPER", "nd with space"} {
 		if _, err := PublicUserAgentFor(bad); err == nil {
 			t.Errorf("PublicUserAgentFor(%q) should fail", bad)
 		}

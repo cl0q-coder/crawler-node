@@ -6,6 +6,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"cl0q/internal/tunable"
 )
 
 // NR7: property-style etiquette conformance. These hammer the politeness
@@ -15,6 +17,12 @@ import (
 
 // TestThrottleEnforcesMinDelayUnderConcurrency: N goroutines racing on one
 // key must be serialized with at least `delay` between acquisitions.
+func init() {
+	if tunables == nil {
+		tunables = tunable.New(time.Second, time.Second, 50)
+	}
+}
+
 func TestThrottleEnforcesMinDelayUnderConcurrency(t *testing.T) {
 	var gates sync.Map
 	const n = 6
@@ -73,9 +81,9 @@ func TestThrottleIndependentKeysDontBlock(t *testing.T) {
 // TestSitePaceObeysLongerCrawlDelay: a site's Crawl-delay longer than the
 // configured host floor must win (max, not the floor).
 func TestSitePaceObeysLongerCrawlDelay(t *testing.T) {
-	old := hostDelay
-	hostDelay = 20 * time.Millisecond
-	defer func() { hostDelay = old }()
+	old := tunables.HostDelay()
+	tunables.SetHostDelayForTest(20 * time.Millisecond)
+	defer func() { tunables.SetHostDelayForTest(old) }()
 
 	host := "nr7-crawldelay.example"
 	sitePace(host, 150*time.Millisecond)
@@ -89,9 +97,9 @@ func TestSitePaceObeysLongerCrawlDelay(t *testing.T) {
 // TestSitePaceFloorAppliesWhenNoCrawlDelay: with no Crawl-delay the
 // configured host floor still paces.
 func TestSitePaceFloorAppliesWhenNoCrawlDelay(t *testing.T) {
-	old := hostDelay
-	hostDelay = 80 * time.Millisecond
-	defer func() { hostDelay = old }()
+	old := tunables.HostDelay()
+	tunables.SetHostDelayForTest(80 * time.Millisecond)
+	defer func() { tunables.SetHostDelayForTest(old) }()
 
 	host := "nr7-floor.example"
 	sitePace(host, 0)

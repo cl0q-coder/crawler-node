@@ -71,8 +71,12 @@ func (c *Checker) refreshLocked() {
 	}
 	c.lastCheck = time.Now()
 	var domains, pages, dbBytes int64
-	err := c.db.QueryRow(`SELECT (SELECT count(*) FROM domain_info),
-		(SELECT count(*) FROM website_info),
+	// reltuples estimates instead of full COUNT(*): these tables hold 13M+
+	// rows and refreshLocked runs every minute on a 1-core DB, where even a
+	// 195k-row read costs 2-4s. The caps are coarse thresholds, so planner
+	// estimates are fine (they track vacuum/analyze within a few percent).
+	err := c.db.QueryRow(`SELECT (SELECT reltuples::bigint FROM pg_class WHERE relname = 'domain_info'),
+		(SELECT reltuples::bigint FROM pg_class WHERE relname = 'website_info'),
 		pg_database_size(current_database())`).Scan(&domains, &pages, &dbBytes)
 	if err != nil {
 		// A failed size check must not pause the crawler; log and keep going.

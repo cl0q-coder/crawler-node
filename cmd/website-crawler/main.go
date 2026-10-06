@@ -1696,7 +1696,10 @@ func fetchSitemap(ctx context.Context, domain string) (int, time.Time) {
 	if !sitemapFetch {
 		return 0, time.Time{}
 	}
-	client := &http.Client{Timeout: 15 * time.Second}
+	// P1 SSRF fix: use the guarded client (netguard.Control via transport)
+	// instead of a bare http.Client. A sitemap URL or redirect to
+	// 169.254.169.254 / 10.x / 127.0.0.1 must be refused at dial time.
+	client := newClient()
 	// Try https first, then http.
 	for _, scheme := range []string{"https", "http"} {
 		sitemapURL := scheme + "://" + domain + "/sitemap.xml"
@@ -1732,7 +1735,8 @@ func fetchSitemap(ctx context.Context, domain string) (int, time.Time) {
 
 // fetchSitemapURL fetches and parses a single sitemap URL.
 func fetchSitemapURL(ctx context.Context, sitemapURL string) (int, time.Time) {
-	client := &http.Client{Timeout: 15 * time.Second}
+	// P1 SSRF fix: guarded client (see fetchSitemap).
+	client := newClient()
 	req, err := http.NewRequestWithContext(ctx, "GET", sitemapURL, nil)
 	if err != nil {
 		return 0, time.Time{}

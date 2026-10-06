@@ -47,6 +47,7 @@ package main
 
 import (
 	"bytes"
+	"cl0q/internal/daily"
 	"context"
 	"crypto/tls"
 	"database/sql"
@@ -238,6 +239,9 @@ var fpChecker *footprint.Checker // NR3: nil until main() opens the DB
 // NR6: observability. Initialized in main(); nil in tests that don't call it.
 var mreg *metrics.Registry
 var mCrawledOK, mCrawledFailed, mCrawledSkipped, mCrawledChallenged, mCrawledUnchanged, mCrawledDeferred, mCrawledBlocked, mCrawledDuplicates, mSitemapFound, mTrapsFlagged *atomic.Int64
+
+// OP4: Daily counters for node-runner "what did my node do today" view.
+var dailyTracker = daily.New()
 var sitemapFetch bool
 var warcWriter *warc.Writer
 var warcFile *os.File
@@ -1482,6 +1486,7 @@ func crawlBatch(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, targets
 		default:
 			done++
 			minc(mCrawledOK)
+			dailyTracker.AddPages(1, out.info.ContentLength) // OP4: daily view
 			if verbose {
 				log.Printf("  · %-32s %3d  %5dms  %q", r.domain, out.info.StatusCode, out.info.LatencyMs, clip(out.info.Title, 50))
 			}

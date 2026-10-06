@@ -3,6 +3,8 @@
 ![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)
 ![Go 1.25](https://img.shields.io/badge/Go-1.25-00ADD8.svg)
 
+> **Open source.** This crawler is now public at [codeberg.org/cl0qsearch/crawler-node](https://codeberg.org/cl0qsearch/crawler-node) — run a node, help index the open web. More to come.
+
 [cl0q](https://cl0q.com) is a free, independent search engine with its own crawler and index. This repository
 is that crawler, packaged so other people can run a **node**: it discovers sites, fetches their homepages
 politely, and sends what it finds to cl0q's index. The search engine itself is not part of this repository

@@ -32,8 +32,10 @@ func TestOpicSharesNoSelfPayment(t *testing.T) {
 	if _, ok := got["a.com"]; ok {
 		t.Error("self-payment should be skipped")
 	}
-	if got["b.com"] != 5 {
-		t.Errorf("b.com share = %v, want 5", got["b.com"])
+	// Self-link filtered BEFORE dividing: b.com gets the full 10, not 5.
+	// (Claude review on #121: corrected expectation.)
+	if got["b.com"] != 10 {
+		t.Errorf("b.com share = %v, want 10", got["b.com"])
 	}
 }
 

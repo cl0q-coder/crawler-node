@@ -31,11 +31,14 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -217,6 +220,7 @@ func main() {
 	nmForwarded := nmreg.Counter("node_rows_forwarded_total", "rows successfully sent to the ingest")
 	nmFailed := nmreg.Counter("node_ingest_failures_total", "ingest POST failures (retried)")
 	nmDeadLettered := nmreg.Counter("node_rows_deadlettered_total", "rows dead-lettered after permanent rejection")
+	nmRateLimited := nmreg.Counter("node_ingest_rate_limited_total", "ingest 429/503 responses (Retry-After honored)")
 	nmAuthState := nmreg.Gauge("node_auth_state", "0=ok, 1=auth failing (backoff), 2=token revoked")
 	nmreg.GaugeFunc("node_watermark_lag_website", "unforwarded rows in website_info", func() int64 {
 		return watermarkLag(db, "website_info")
@@ -235,6 +239,9 @@ func main() {
 	}
 	send := authSender(ts, newSender)
 	// NR6: count forward outcomes.
+	// A1: rate-limit gate — honors the ingest's Retry-After so a 429'd node
+	// stops hammering instead of retrying on the next tight cycle.
+	gate := &rateGate{}
 	countedSend := func(path string, rows any) error {
 		err := send(path, rows)
 		if err == nil {
@@ -246,6 +253,17 @@ func main() {
 			}
 		} else {
 			nmFailed.Add(1)
+			var se *statusError
+			if errors.As(err, &se) && (se.status == http.StatusTooManyRequests || se.status == http.StatusServiceUnavailable) {
+				nmRateLimited.Add(1)
+				d := se.retryAfter
+				if d <= 0 {
+					// No header: back off one interval rather than spinning.
+					d = *interval
+				}
+				gate.note(d)
+				log.Printf("ingest rate-limited (status %d): holding off sends for %v", se.status, d)
+			}
 			if _, dead := permanent(err); dead {
 				// The batch was dead-lettered (forward moves it there on
 				// permanent rejection); count the rows.
@@ -280,10 +298,14 @@ func main() {
 			return
 		}
 		// NR5: after auth failures, back off longer than the normal interval
-		// instead of spinning on a dead token.
+		// instead of spinning on a dead token. A1: same for ingest rate
+		// limits — the gate holds until Retry-After elapses.
 		wait := *interval
 		if ab := ts.authBackoff(); ab > wait {
 			wait = ab
+		}
+		if rb := gate.remaining(); rb > wait {
+			wait = rb
 		}
 		if !sleepCtx(ctx, wait) {
 			if ctx.Err() != nil {
@@ -336,9 +358,76 @@ type sender func(path string, rows any) error
 type statusError struct {
 	status int
 	body   string
+	// retryAfter is how long the server asked us to wait (Retry-After on
+	// 429/503), parsed at response time. Zero when the server sent none.
+	retryAfter time.Duration
 }
 
 func (e *statusError) Error() string { return fmt.Sprintf("status %d: %s", e.status, e.body) }
+
+// parseRetryAfter interprets a Retry-After header value per RFC 7231 §7.1.3:
+// either delay-seconds or an HTTP-date. Out-of-range or unparseable values
+// yield 0 (caller falls back to the normal interval).
+func parseRetryAfter(v string) time.Duration {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0
+	}
+	if secs, err := strconv.Atoi(v); err == nil {
+		if secs < 0 {
+			return 0
+		}
+		return time.Duration(secs) * time.Second
+	}
+	if t, err := http.ParseTime(v); err == nil {
+		d := time.Until(t)
+		if d < 0 {
+			return 0
+		}
+		return d
+	}
+	return 0
+}
+
+// rateGate holds the ingest-imposed hold-off: when the server answers 429 or
+// 503 with Retry-After, forward loops must not fire again until it elapses.
+// A1: without this, a 429'd node retries on the next tight cycle and keeps
+// hammering the ingest it was told to leave alone.
+type rateGate struct {
+	mu    sync.Mutex
+	until time.Time
+}
+
+// maxRateBackoff caps a single Retry-After note: a quota 429 may say 24h,
+// but sleeping the whole forwarder that long hides operator errors. The
+// server re-429s on the next cycle if the quota is still spent.
+const maxRateBackoff = time.Hour
+
+// note records a hold-off of d (plus jitter so many 429'd nodes don't
+// retry in lockstep). Keeps the latest (furthest) deadline.
+func (g *rateGate) note(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	if d > maxRateBackoff {
+		d = maxRateBackoff
+	}
+	jitter := time.Duration(rand.Int63n(int64(5 * time.Second)))
+	deadline := time.Now().Add(d + jitter)
+	g.mu.Lock()
+	if deadline.After(g.until) {
+		g.until = deadline
+	}
+	g.mu.Unlock()
+}
+
+// remaining is how long the forwarder must still wait. Zero when no
+// hold-off is in effect.
+func (g *rateGate) remaining() time.Duration {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return time.Until(g.until)
+}
 
 // permanent reports whether a POST error means the ingest will never accept this batch as sent: a 4xx other than
 // 401/403 (token or source IP — fix the node, then the same batch goes through), 408 or 429 (try later).
@@ -560,7 +649,11 @@ func post(hc *http.Client, url, token string, rows any) error {
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	if resp.StatusCode != http.StatusOK {
-		return &statusError{status: resp.StatusCode, body: strings.TrimSpace(string(b))}
+		se := &statusError{status: resp.StatusCode, body: strings.TrimSpace(string(b))}
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			se.retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+		}
+		return se
 	}
 	return nil
 }

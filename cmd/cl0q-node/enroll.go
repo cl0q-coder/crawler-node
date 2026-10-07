@@ -42,8 +42,36 @@ type enrollResponse struct {
 	// PowChallenge, when present, is a G-12 proof-of-work Sybil gate: the
 	// client must solve it and confirm before credentials are trusted.
 	// Absent = server doesn't require PoW; enrollment proceeds unchanged.
-	PowChallenge *trust.Challenge `json:"pow_challenge,omitempty"`
-	OperatorLabel string `json:"operator_label,omitempty"` // server-echoed label
+	PowChallenge  *trust.Challenge `json:"pow_challenge,omitempty"`
+	OperatorLabel string           `json:"operator_label,omitempty"` // server-echoed label
+	// Graduation criteria, when the server provides them. If absent, the
+	// client falls back to the documented defaults (see graduationText).
+	// Added so HE-1 can tune quarantine without a client release.
+	GraduationVerifiedSubmissions *int `json:"graduation_verified_submissions,omitempty"`
+	GraduationCleanDays           *int `json:"graduation_clean_days,omitempty"`
+}
+
+// graduationText renders the quarantine graduation criteria, preferring
+// server-provided values over the hardcoded defaults.
+func graduationText(resp *enrollResponse) string {
+	subs, days := 1000, 3
+	if resp.GraduationVerifiedSubmissions != nil {
+		subs = *resp.GraduationVerifiedSubmissions
+	}
+	if resp.GraduationCleanDays != nil {
+		days = *resp.GraduationCleanDays
+	}
+	return fmt.Sprintf("Graduation is automatic: %s verified submissions + %d clean days. Nothing to do but crawl.",
+		formatInt(subs), days)
+}
+
+func formatInt(n int) string {
+	s := fmt.Sprintf("%d", n)
+	// Add thousands separators for readability.
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 // nodeCredentials is what lives in the credentials file (0600). The
@@ -245,8 +273,7 @@ func doEnroll(ingestURL, contact, label, out string) error {
 	if er.Quarantined {
 		fmt.Println("status: QUARANTINED — this is normal for a new node.")
 		fmt.Println("  Your submissions are spot-verified before reaching the live index.")
-		fmt.Println("  Graduation is automatic: 1,000 verified submissions + 3 clean days,")
-		fmt.Println("  or 1 verified submission + 7 clean days. Nothing to do but crawl.")
+		fmt.Println("  " + graduationText(&er))
 	} else {
 		fmt.Println("status: trusted.")
 	}

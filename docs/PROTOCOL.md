@@ -51,6 +51,19 @@ Response `200 OK` (JSON):
 }
 ```
 
+Optional: the server may include the quarantine graduation criteria so the
+client doesn't hardcode them:
+
+```json
+{
+  "graduation_verified_submissions": 1000,
+  "graduation_clean_days": 3
+}
+```
+
+If absent, the client uses the documented defaults (1,000 verified
+submissions + 3 clean days).
+
 - The node stores `node_id`, `token`, and `refresh_secret` in its config file
   with mode `0600` and **never logs them** (not even at debug level). Both
   secrets appear once, in this response only — never printed to the terminal.

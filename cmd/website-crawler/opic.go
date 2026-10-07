@@ -40,11 +40,19 @@ func opicShares(sources map[string][]string, cash map[string]float64) map[string
 		if c <= 0 {
 			continue
 		}
-		per := c / float64(len(outs))
+		// Filter self-links BEFORE dividing: otherwise self-links dilute
+		// the per-dest share even though they receive nothing.
+		var filtered []string
 		for _, dest := range outs {
-			if dest == src {
-				continue // no self-payment
+			if dest != src {
+				filtered = append(filtered, dest)
 			}
+		}
+		if len(filtered) == 0 {
+			continue // only self-links; nothing to distribute
+		}
+		per := c / float64(len(filtered))
+		for _, dest := range filtered {
 			out[dest] += per
 		}
 	}

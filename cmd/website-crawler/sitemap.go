@@ -6,8 +6,8 @@ package main
 // pass we already fetch per host; here we also collect Sitemap: directives
 // (plus a /sitemap.xml fallback), fetch them, and feed discovered URLs into
 // the same outDomains discovery path the page parser uses. lastmod is parsed
-// and retained for future scheduling priority (T3); today it is recorded but
-// the frontier is still uniform-sampled.
+// but NOT persisted — it is available in sitemapEntry for future scheduling
+// priority (T3), but today the frontier is still uniform-sampled.
 
 import (
 	"bytes"
@@ -224,7 +224,8 @@ func sitemapDiscover(domain, ip string, ri robotsInfo, info *WebsiteInfo) {
 			return
 		}
 	}
-	sitemapChecked.Store(domain, now)
+	// Note: sitemapChecked is stored AFTER successful fetch below, not here.
+	// Storing before would burn the 24h window on failure.
 
 	// Pace sitemap fetches like any other request to this host/IP.
 	hostThrottle(domain)
@@ -237,6 +238,8 @@ func sitemapDiscover(domain, ip string, ri robotsInfo, info *WebsiteInfo) {
 	if len(entries) == 0 {
 		return
 	}
+	// Store only after success: a failed fetch shouldn't burn the 24h window.
+	sitemapChecked.Store(domain, time.Now().Unix())
 	if info.outDomains == nil {
 		info.outDomains = map[string]bool{}
 	}

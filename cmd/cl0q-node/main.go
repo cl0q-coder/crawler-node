@@ -89,6 +89,8 @@ type wiRow struct {
 	FetchError    string `json:"fetch_error,omitempty"`
 	ETag          string `json:"etag,omitempty"`
 	LastModified  string `json:"last_modified,omitempty"`
+	Simhash       int64  `json:"simhash,omitempty"`
+	DuplicateOf   string `json:"duplicate_of,omitempty"`
 }
 
 type diRow struct {
@@ -442,7 +444,8 @@ func (p pgStore) readBatch(table string, afterID int64, limit int) (rowsOut any,
 	case "website_info":
 		q := `SELECT id,domain,title,description,keywords,canonical,h1,status_code,content_type,
 			content_length,latency_ms,redirects,outbound_links,image_count,word_count,charset,robots,
-			og_title,og_image,twitter_card,page_language,server_header,fetch_error,etag,last_modified
+			og_title,og_image,twitter_card,page_language,server_header,fetch_error,etag,last_modified,
+			simhash,duplicate_of
 			FROM website_info WHERE id > $1 ORDER BY id LIMIT $2`
 		rs, e := db.Query(q, afterID, limit)
 		if e != nil {
@@ -453,10 +456,10 @@ func (p pgStore) readBatch(table string, afterID int64, limit int) (rowsOut any,
 		for rs.Next() {
 			var id int64
 			var d string
-			var t, de, k, ca, h1, ct, ch, ro, ogt, ogi, tw, pl, sh, fe, et, lm sql.NullString
-			var sc, cl, lt, rd, ob, ic, wc sql.NullInt64
+			var t, de, k, ca, h1, ct, ch, ro, ogt, ogi, tw, pl, sh, fe, et, lm, dup sql.NullString
+			var sc, cl, lt, rd, ob, ic, wc, sim sql.NullInt64
 			if e := rs.Scan(&id, &d, &t, &de, &k, &ca, &h1, &sc, &ct, &cl, &lt, &rd, &ob, &ic, &wc,
-				&ch, &ro, &ogt, &ogi, &tw, &pl, &sh, &fe, &et, &lm); e != nil {
+				&ch, &ro, &ogt, &ogi, &tw, &pl, &sh, &fe, &et, &lm, &sim, &dup); e != nil {
 				return nil, 0, 0, afterID, e
 			}
 			scanned++
@@ -471,6 +474,7 @@ func (p pgStore) readBatch(table string, afterID int64, limit int) (rowsOut any,
 				WordCount: wc.Int64, Charset: ch.String, Robots: ro.String, OGTitle: ogt.String,
 				OGImage: ogi.String, TwitterCard: tw.String, PageLanguage: pl.String, ServerHeader: sh.String,
 				FetchError: fe.String, ETag: et.String, LastModified: lm.String,
+				Simhash: sim.Int64, DuplicateOf: dup.String,
 			})
 		}
 		return out, len(out), scanned, maxID, rs.Err()

@@ -5,9 +5,17 @@
 
 # build output
 /bin/
+/dist/
 *.exe
 *.test
 *.out
+# never commit built binaries at the repo root (see #119: stray website-crawler binary)
+/website-crawler
+/domain-crawler
+/dns-enricher
+/asn-enricher
+/cl0q-node
+/preflight
 
 # editor / OS
 *.swp

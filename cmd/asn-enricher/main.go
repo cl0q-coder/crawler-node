@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -34,6 +35,7 @@ import (
 
 	"cl0q/dbresil"
 	"cl0q/internal/config"
+	"cl0q/netguard"
 )
 
 // validateConfig checks every knob at startup (NR2). A bad value is a FATAL
@@ -118,7 +120,13 @@ func main() {
 		return
 	}
 	// The token goes to api.ipinfo.io only: redirects are never followed (a 3xx is a failed lookup, retried later).
+	// The ipinfo API is public; the netguard SSRF guard on the transport
+	// refuses any dial to a non-public address. Timeouts and redirect
+	// policy are unchanged — only the dial Control hook is added.
 	httpClient := &http.Client{Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{Control: netguard.Control}).DialContext,
+		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 	// ---------------- continuous loop (service) or one-shot ----------------

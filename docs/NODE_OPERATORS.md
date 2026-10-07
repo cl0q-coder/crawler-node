@@ -17,7 +17,7 @@ Nothing listens on a public port. Your node only makes outbound requests.
 ```sh
 git clone https://gitea.cl0q.com/chris/crawler-node && cd crawler-node
 docker compose build
-docker compose run --rm cl0q-node enroll --contact you@example.com
+docker compose run --rm cl0q-node enroll --contact you@example.com --label "My Home Server"
 ```
 
 This calls cl0q's ingest server and enrolls you as a node. The server
@@ -26,10 +26,15 @@ returns three things: your unique `NODE_ID`, a secret token, and a
 stored in `cl0q-node.json` (mode `0600`, never shown or logged — the
 secrets are printed nowhere, not even in your own terminal).
 The contact email is optional but recommended — it's how cl0q reaches you
-if your node ever causes trouble.
+if your node ever causes trouble. The `--label` is a friendly name for
+your node (shown in the admin view); pick something you'll recognize.
 
-The command tells you your trust state when it finishes. Every new node
-starts **quarantined**.
+When it finishes, the command tells you plainly: you're enrolled, whether
+you're quarantined or trusted, and exactly how to confirm the node is
+crawling (`preflight`, then `status`, then watch your forwarded-row count
+climb). **Save that output.** If anything looks wrong later, support will
+ask for it before anything else — don't re-run enroll blindly; a second
+enroll creates a second quarantined node.
 
 ### Quarantine, plainly
 

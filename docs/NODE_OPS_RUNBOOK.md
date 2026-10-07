@@ -88,9 +88,35 @@ deploys before blaming the node fleet.
    "why aren't my pages in the index" ticket never gets filed.
 3. Ask for `--contact` at enrol time. Nodes without a contact are
    unreachable for abuse reports — chase the top submitters monthly.
-4. After a wave, watch aggregate `node_rows_forwarded_total` across the
+4. Ask for `--label` too (e.g. `"UK Home Server"`). It shows in the
+   admin view and makes support threads unambiguous about which box
+   we're talking about.
+5. After a wave, watch aggregate `node_rows_forwarded_total` across the
    fleet, not per-node numbers. Measure the program by **net-new
    domains/day** (A1+A2 sequencing note).
+
+### Enrollment confirmation checklist (GAP-3)
+
+The UK-node double-enroll happened because the operator got a bare
+node_id and no confirmation the node was actually working. When an
+operator says "I enrolled but nothing is happening", walk this list —
+do not tell them to re-enrol until step 4 fails:
+
+1. **Read their enroll output back to them.** Since GAP-3 the client
+   prints `enrolled as node <id>`, the quarantine status in plain
+   language, and the three confirmation steps. If they can't produce
+   that output, they didn't complete enrol — have them run it once,
+   slowly, and paste the result.
+2. **`cl0q-node preflight`** — ingest reachability + token validity.
+   A 403 here usually means source-IP mismatch (GAP-1: tokens are bound
+   to the enrolment IP) — the fix is re-enrolling from the node's real
+   address, not retrying.
+3. **`cl0q-node status`** after starting — the operator snapshot.
+   `node_rows_forwarded_total` climbing = working.
+4. **Only if 1–3 fail**: check `node_auth_state` (2 = revoked, see §4)
+   and watermark lag before ever suggesting re-enrol. Re-enrol is
+   authenticated rotation, not a retry button — a second blind enrol
+   creates a second quarantined node and doubles the confusion.
 
 ## 7. What not to do
 

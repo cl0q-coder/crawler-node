@@ -101,7 +101,7 @@ func TestRunEnrollRoundTrip(t *testing.T) {
 
 	// runEnrollCommand os.Exits on failure; success returns normally.
 	// Call the pieces directly to stay in-process.
-	if err := doEnroll(srv.URL, "op@example.com", path); err != nil {
+	if err := doEnroll(srv.URL, "op@example.com", "", path); err != nil {
 		t.Fatal(err)
 	}
 	// Request shape per PROTOCOL.md.
@@ -137,7 +137,7 @@ func TestRunEnrollRejectsMissingRefreshSecret(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "creds.json")
-	if err := doEnroll(srv.URL, "", path); err == nil {
+	if err := doEnroll(srv.URL, "", "", path); err == nil {
 		t.Fatal("enrol without refresh_secret should fail")
 	} else if !strings.Contains(err.Error(), "refresh_secret") {
 		t.Errorf("error should mention refresh_secret, got %q", err.Error())
@@ -163,7 +163,7 @@ func TestRunEnrollRotationSendsNodeIDAndRefreshSecret(t *testing.T) {
 	if err := writeCredentials(path, nodeCredentials{NodeID: "nd-old1", Token: "old-secret", RefreshSecret: "rs-old1"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := doEnroll(srv.URL, "", path); err != nil {
+	if err := doEnroll(srv.URL, "", "", path); err != nil {
 		t.Fatal(err)
 	}
 	if got.NodeID != "nd-old1" || got.RefreshSecret != "rs-old1" {
@@ -195,7 +195,7 @@ func TestRunEnrollLegacyCredsFallBackToFreshEnrol(t *testing.T) {
 	if err := os.WriteFile(path, legacy, 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := doEnroll(srv.URL, "", path); err != nil {
+	if err := doEnroll(srv.URL, "", "", path); err != nil {
 		t.Fatal(err)
 	}
 	if got.NodeID != "" || got.RefreshSecret != "" {
@@ -227,7 +227,7 @@ func TestDoEnrollRefusesRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := doEnroll(srv.URL, "op@example.com", path)
+	err := doEnroll(srv.URL, "op@example.com", "", path)
 	if err == nil {
 		t.Fatal("doEnroll must fail on 3xx redirect, got nil error")
 	}
@@ -242,5 +242,44 @@ func TestDoEnrollRefusesRedirect(t *testing.T) {
 		if c.NodeID != "nd-test1" {
 			t.Errorf("credentials file was overwritten by redirect flow: %+v", c)
 		}
+	}
+}
+
+func TestEnrollOperatorLabelRoundTrip(t *testing.T) {
+	// GAP-1: the client sends operator_label and stores the server-echoed
+	// label in the credentials file.
+	var gotLabel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var er enrollRequest
+		json.Unmarshal(body, &er)
+		gotLabel = er.OperatorLabel
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(enrollResponse{
+			NodeID: "nd-label1", Token: "mock-secret", RefreshSecret: "rs-label1",
+			Quarantined: true, OperatorLabel: er.OperatorLabel,
+		})
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "creds.json")
+	if err := doEnroll(srv.URL, "", "UK Home Server", path); err != nil {
+		t.Fatal(err)
+	}
+	if gotLabel != "UK Home Server" {
+		t.Errorf("server got operator_label %q, want %q", gotLabel, "UK Home Server")
+	}
+	creds, _ := loadCredentials()
+	// loadCredentials reads NODE_CREDENTIALS_FILE; point it at our file.
+	t.Setenv("NODE_CREDENTIALS_FILE", path)
+	creds, _ = loadCredentials()
+	if creds.OperatorLabel != "UK Home Server" {
+		t.Errorf("stored operator_label %q, want %q", creds.OperatorLabel, "UK Home Server")
+	}
+	// Label must never leak secrets-adjacent treatment: it is not a secret,
+	// but it must round-trip exactly (no trimming surprises).
+	if strings.TrimSpace(creds.OperatorLabel) != creds.OperatorLabel {
+		t.Errorf("label was mangled in storage: %q", creds.OperatorLabel)
 	}
 }

@@ -22,12 +22,21 @@ Request (JSON):
 ```json
 {
   "version": "cl0q-node/1.0",
-  "operator_contact": "operator@example.com"
+  "operator_contact": "operator@example.com",
+  "operator_label": "UK Home Server"
 }
 ```
 
 `operator_contact` is optional but recommended — it is how cl0q reaches the
-operator about abuse reports or revocation.
+operator about abuse reports or revocation. `operator_label` is optional — a
+human-friendly name for the node, shown in the admin view and echoed back in
+the response.
+
+The server records the enrolling source IP (from `X-Real-IP`, which the
+fronting proxy sets) into the node row alongside the contact and label.
+Tokens are bound to the enrolment network: a request from a different
+source IP gets `403` with a revocation flag (see §2) — the operator
+re-enrols from the node's real address.
 
 Response `200 OK` (JSON):
 
@@ -37,7 +46,8 @@ Response `200 OK` (JSON):
   "token": "<secret, shown once>",
   "refresh_secret": "<secret, shown once>",
   "ingest_url": "https://cl0q.com",
-  "quarantined": true
+  "quarantined": true,
+  "operator_label": "UK Home Server"
 }
 ```
 

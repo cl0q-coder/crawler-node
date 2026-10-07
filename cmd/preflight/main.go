@@ -71,6 +71,20 @@ func main() {
 	fmt.Printf("\npreflight: all %d checks passed\n", len(results))
 }
 
+// guardedClient returns the standard 15s-timeout check client with the
+// netguard SSRF guard wired into its transport: dials to non-public
+// addresses (loopback, RFC 1918, link-local, metadata, …) are refused.
+// Timeouts and all other behavior are unchanged — only the dial Control
+// hook is added.
+func guardedClient() *http.Client {
+	return &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{Control: netguard.Control}).DialContext,
+		},
+	}
+}
+
 // checkLocalDB pings the node's Postgres.
 func checkLocalDB() checkResult {
 	dsn := os.Getenv("LOCAL_DATABASE_URL")
@@ -110,7 +124,7 @@ func checkIngest() checkResult {
 		return checkResult{"ingest", false, fmt.Sprintf("build request: %v", err)}
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := guardedClient()
 	resp, err := client.Do(req)
 	if err != nil {
 		return checkResult{"ingest", false, fmt.Sprintf("GET %s/api/ingest/ping: %v", ingestURL, err)}
@@ -139,7 +153,7 @@ func checkDNS() checkResult {
 
 // checkEgress performs a plain HTTPS GET to confirm outbound web access.
 func checkEgress() checkResult {
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := guardedClient()
 	resp, err := client.Get("https://example.com/")
 	if err != nil {
 		return checkResult{"egress", false, fmt.Sprintf("GET https://example.com/: %v", err)}
@@ -170,7 +184,7 @@ func checkNetguard() checkResult {
 // checkRobots fetches and parses a real robots.txt, proving the robots
 // pipeline (fetch + parse) works end to end.
 func checkRobots() checkResult {
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := guardedClient()
 	resp, err := client.Get("https://example.com/robots.txt")
 	if err != nil {
 		return checkResult{"robots", false, fmt.Sprintf("fetch robots.txt: %v", err)}

@@ -77,12 +77,12 @@ Authorization: Bearer <token>
 
 - The HTTP client **never follows redirects** — a redirect response is
   surfaced as an error, so the token only ever goes to `ingest_url`.
-- The server checks the token (it stores only the SHA-256 hash). Open-enrolled
-  nodes are **token-only**: they authenticate from any source IP, so a dynamic
-  or rotating egress IP is fine — it does not trip anything. (cl0q can
-  optionally pin a specific node to a source-IP CIDR; such a node receives
-  `403` from an off-allowlist address. This is not the default and is never set
-  by open enrol.) Quarantine (§3) is the trust mechanism, not the source IP.
+- The server checks the token (it stores only the SHA-256 hash). Tokens are
+  bound to the enrolment source IP (see §1): a request from a different IP
+  gets `403`. If the node's egress IP changes (dynamic ISP, new host),
+  re-enrol from the new address — do not keep retrying with the old token.
+  Quarantine (§3) remains the trust mechanism for *what* a node submits;
+  the IP binding is the mechanism for *who* may submit as that node.
 
 ## 3. Trust states
 

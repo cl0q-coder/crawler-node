@@ -95,6 +95,7 @@ var (
 	dbSeedsN      = flag.Int("db-seeds", 200, "random existing domain_info domains added as seeds each cycle (0=off) — mines known domains for new outbound links to beat the fixed-seed plateau")
 	batchFlag     = flag.Int("db-batch", envInt("DB_BATCH", 200), "discovered domains buffered per INSERT (one commit) — fewer commits = far less remote DB load")
 	noBackfillFlag = flag.Bool("no-subdomain-backfill", false, "skip the background backfill of registrable_domain/is_subdomain for pre-existing rows")
+	maxSubsPerParentFlag = flag.Int("max-subdomains-per-parent", envInt("MAX_SUBDOMAINS_PER_PARENT", 10000), "max subdomains stored per registrable parent (0=off) — caps runaway discovery from wildcard DNS or huge platforms")
 	queueCap      = flag.Int("queue-cap", envInt("QUEUE_CAP", 50000), "max URLs queued at once (bounds BFS memory; 0=unbounded). Fan-out pages can otherwise push this to 500k+ and OOM the box.")
 	// A site gets at most perHostPages pages per cycle, at least hostDelayMs apart
 	// (or its robots Crawl-delay, if longer). Other sites' pages are served while one waits, so pacing costs
@@ -446,6 +447,7 @@ func main() {
 				buf = buf[:0]
 				return
 			}
+			buf = filterSubdomainCap(db, buf, *maxSubsPerParentFlag)
 			inserted += flushDomains(db, spool, buf)
 			buf = buf[:0]
 		}
@@ -761,6 +763,68 @@ func backfillSubdomainColumns(db *sql.DB, batchSize int) {
 		total += n
 		log.Printf("[INFO] subdomain backfill: %d rows total", total)
 	}
+}
+
+// filterSubdomainCap drops batch entries whose registrable parent already has
+// >= maxSubs subdomains in domain_info. This caps runaway subdomain discovery
+// from wildcard DNS or huge platforms (blogspot.com, tumblr.com) so they stop
+// inflating the DB once the cap is reached. Non-subdomains always pass.
+// Best-effort: on DB error the batch passes through unfiltered (fail open —
+// discovery continues). maxSubs <= 0 disables the cap.
+// Note: counts come from the registrable_domain column, so the cap is exact
+// once the startup backfill completes; until then it is approximate (fail open).
+func filterSubdomainCap(db *sql.DB, batch []pendDomain, maxSubs int) []pendDomain {
+	if maxSubs <= 0 || len(batch) == 0 {
+		return batch
+	}
+	parents := map[string]bool{}
+	for _, p := range batch {
+		if p.isSubdomain && p.registrable != "" {
+			parents[p.registrable] = true
+		}
+	}
+	if len(parents) == 0 {
+		return batch
+	}
+	plist := make([]string, 0, len(parents))
+	for p := range parents {
+		plist = append(plist, p)
+	}
+	counts := map[string]int64{}
+	rows, err := db.Query(`SELECT registrable_domain, COUNT(*) FROM domain_info WHERE registrable_domain = ANY($1) GROUP BY registrable_domain`, pq.Array(plist))
+	if err != nil {
+		log.Printf("[WARN] subdomain cap check failed (fail open): %v", err)
+		return batch
+	}
+	for rows.Next() {
+		var parent string
+		var n int64
+		if err := rows.Scan(&parent, &n); err != nil {
+			break
+		}
+		counts[parent] = n
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		log.Printf("[WARN] subdomain cap scan failed (fail open): %v", err)
+		return batch
+	}
+	droppedByParent := map[string]int{}
+	kept := batch[:0]
+	for _, p := range batch {
+		if p.isSubdomain && p.registrable != "" && counts[p.registrable] >= int64(maxSubs) {
+			droppedByParent[p.registrable]++
+			continue
+		}
+		kept = append(kept, p)
+	}
+	for i := len(kept); i < len(batch); i++ {
+		batch[i] = pendDomain{}
+	}
+	for parent, n := range droppedByParent {
+		log.Printf("[INFO] subdomain cap: dropped %d subdomain(s) under %s (cap %d, stored %d)", n, parent, maxSubs, counts[parent])
+	}
+	return kept
 }
 
 // flushDomains inserts a buffer of resolved domains in ONE statement (an 8-array unnest with the

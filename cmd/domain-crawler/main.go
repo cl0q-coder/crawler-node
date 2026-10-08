@@ -94,6 +94,7 @@ var (
 	maxConns      = flag.Int("max-conns", 4, "max DB connections (BFS is sequential; capped for the shared 100-conn DB)")
 	dbSeedsN      = flag.Int("db-seeds", 200, "random existing domain_info domains added as seeds each cycle (0=off) — mines known domains for new outbound links to beat the fixed-seed plateau")
 	batchFlag     = flag.Int("db-batch", envInt("DB_BATCH", 200), "discovered domains buffered per INSERT (one commit) — fewer commits = far less remote DB load")
+	noBackfillFlag = flag.Bool("no-subdomain-backfill", false, "skip the background backfill of registrable_domain/is_subdomain for pre-existing rows")
 	queueCap      = flag.Int("queue-cap", envInt("QUEUE_CAP", 50000), "max URLs queued at once (bounds BFS memory; 0=unbounded). Fan-out pages can otherwise push this to 500k+ and OOM the box.")
 	// A site gets at most perHostPages pages per cycle, at least hostDelayMs apart
 	// (or its robots Crawl-delay, if longer). Other sites' pages are served while one waits, so pacing costs
@@ -357,6 +358,14 @@ func main() {
 		mx_records TEXT, cname TEXT, found_on TEXT, crawled_at TIMESTAMP)`); err != nil {
 		log.Fatalf("ensure domain_info: %v", err)
 	}
+	// Subdomain inflation visibility: registrable parent + subdomain flag.
+	// ALTERs are metadata-only and idempotent; indexes ship via the
+	// cl0q-search migration (CONCURRENTLY, needs Chris's approval).
+	ensureSubdomainColumns(db)
+	// Backfill pre-existing rows in the background (batched, resumable).
+	if !*noBackfillFlag {
+		go backfillSubdomainColumns(db, 50000)
+	}
 	// key/value runtime settings (e.g. crawl_subdomains = on to follow subdomains).
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS cl0q_settings (key TEXT PRIMARY KEY, value TEXT)`); err != nil {
 		log.Printf("[WARN] ensure cl0q_settings: %v", err)
@@ -378,6 +387,7 @@ func main() {
 	spool := dbresil.Open(os.Getenv("SPOOL_DATABASE_URL"), spoolCap)
 	if spool != nil {
 		log.Printf("[INFO] spool: local outbox enabled (cap %d rows)", spoolCap)
+		ensureSubdomainColumns(spool.DB())
 	}
 
 	type item struct {
@@ -633,6 +643,11 @@ func resolveLink(raw, base string) (domain, full string) {
 // pendDomain is a DNS-resolved domain buffered for a batched insert.
 type pendDomain struct {
 	domain, v4, v6, mx, cname, foundOn string
+	// registrable is the eTLD+1 parent (crawlutil.Registrable); isSubdomain is
+	// true when domain is below its registrable parent. Populated at ingest so
+	// headline counts can be reported as registrable domains, not raw rows.
+	registrable string
+	isSubdomain bool
 }
 
 // dnsTimeout bounds each lookup in resolveDomain: the BFS is single-threaded, so one slow resolver must not stall
@@ -668,17 +683,95 @@ func resolveDomain(domain, foundOn string) pendDomain {
 		}
 	})
 	lookup(func(ctx context.Context) { cname, _ = net.DefaultResolver.LookupCNAME(ctx, domain) })
-	return pendDomain{domain, strings.Join(v4, ","), strings.Join(v6, ","), strings.Join(mxList, ","), cname, foundOn}
+	// Subdomain tracking: registrable parent + subdomain flag, computed once at
+	// ingest via the shared PSL helper (same semantics as the crawl filters).
+	reg := crawlutil.Registrable(domain)
+	return pendDomain{domain, strings.Join(v4, ","), strings.Join(v6, ","), strings.Join(mxList, ","), cname, foundOn, reg, crawlutil.IsSubdomain(domain)}
 }
 
-// flushDomains inserts a buffer of resolved domains in ONE statement (a 6-array unnest with the
+// ensureSubdomainColumns adds the subdomain-tracking columns to domain_info if
+// they are missing. ALTER TABLE ... ADD COLUMN is metadata-only (no table
+// rewrite) and idempotent, so it is safe to run at every startup against both
+// the remote DB and the spool outbox. Indexes are NOT created here — they ship
+// via the cl0q-search migration as CREATE INDEX CONCURRENTLY.
+func ensureSubdomainColumns(db *sql.DB) {
+	if db == nil {
+		return
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE domain_info ADD COLUMN IF NOT EXISTS registrable_domain TEXT`,
+		`ALTER TABLE domain_info ADD COLUMN IF NOT EXISTS is_subdomain BOOLEAN`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			log.Printf("[WARN] ensureSubdomainColumns: %v", err)
+		}
+	}
+}
+
+// backfillSubdomainColumns fills registrable_domain / is_subdomain for rows
+// that predate the columns. It runs in the background so startup is not
+// blocked: each batch selects up to batchSize rows with NULL registrable_domain
+// ordered by id, computes the PSL parent in Go, and updates via unnest. The
+// NULL check makes it resumable — a restart picks up where it left off, and
+// rows inserted concurrently by the crawler already carry values.
+// On 42.6M rows expect ~15-30 minutes; progress is logged per batch.
+func backfillSubdomainColumns(db *sql.DB, batchSize int) {
+	log.Printf("[INFO] subdomain backfill: starting (batch %d)", batchSize)
+	var total int64
+	for {
+		rows, err := db.Query(`SELECT id, domain FROM domain_info WHERE registrable_domain IS NULL ORDER BY id LIMIT $1`, batchSize)
+		if err != nil {
+			log.Printf("[WARN] subdomain backfill select: %v", err)
+			return
+		}
+		var ids []int
+		var domains []string
+		for rows.Next() {
+			var id int
+			var domain string
+			if err := rows.Scan(&id, &domain); err != nil {
+				break
+			}
+			ids = append(ids, id)
+			domains = append(domains, domain)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			log.Printf("[WARN] subdomain backfill scan: %v", err)
+			return
+		}
+		if len(ids) == 0 {
+			log.Printf("[INFO] subdomain backfill: complete (%d rows)", total)
+			return
+		}
+		rds := make([]string, len(ids))
+		sds := make([]bool, len(ids))
+		for i, d := range domains {
+			rds[i] = crawlutil.Registrable(d)
+			sds[i] = crawlutil.IsSubdomain(d)
+		}
+		res, err := db.Exec(`UPDATE domain_info AS di SET registrable_domain = t.rd, is_subdomain = t.sd
+			FROM unnest($1::int[], $2::text[], $3::boolean[]) AS t(id, rd, sd)
+			WHERE di.id = t.id`, pq.Array(ids), pq.Array(rds), pq.Array(sds))
+		if err != nil {
+			log.Printf("[WARN] subdomain backfill update: %v", err)
+			return
+		}
+		n, _ := res.RowsAffected()
+		total += n
+		log.Printf("[INFO] subdomain backfill: %d rows total", total)
+	}
+}
+
+// flushDomains inserts a buffer of resolved domains in ONE statement (an 8-array unnest with the
 // same NOT EXISTS dedup) instead of one autocommit INSERT per domain. domain_info.domain is not
 // unique, so NOT EXISTS is the dedup; the per-cycle seenDomain map already prevents in-batch dups.
+// registrable_domain / is_subdomain are populated at ingest (subdomain inflation visibility).
 // Returns how many NEW rows were inserted.
 const diInsertSQL = `
-	INSERT INTO domain_info (domain, ip_addresses_ipv4, ip_addresses_ipv6, mx_records, cname, found_on, crawled_at)
-	SELECT t.d, t.v4, t.v6, t.mx, t.cn, t.fo, now()
-	FROM unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[],$6::text[]) AS t(d,v4,v6,mx,cn,fo)
+	INSERT INTO domain_info (domain, ip_addresses_ipv4, ip_addresses_ipv6, mx_records, cname, found_on, crawled_at, registrable_domain, is_subdomain)
+	SELECT t.d, t.v4, t.v6, t.mx, t.cn, t.fo, now(), t.rd, t.sd
+	FROM unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[],$6::text[],$7::text[],$8::boolean[]) AS t(d,v4,v6,mx,cn,fo,rd,sd)
 	WHERE NOT EXISTS (SELECT 1 FROM domain_info di WHERE di.domain = t.d)`
 
 func flushDomains(remote *sql.DB, spool *dbresil.Spooler, batch []pendDomain) int {
@@ -691,10 +784,13 @@ func flushDomains(remote *sql.DB, spool *dbresil.Spooler, batch []pendDomain) in
 	mx := make([]string, len(batch))
 	cn := make([]string, len(batch))
 	fo := make([]string, len(batch))
+	rd := make([]string, len(batch))
+	sd := make([]bool, len(batch))
 	for i, p := range batch {
 		d[i], v4[i], v6[i], mx[i], cn[i], fo[i] = p.domain, p.v4, p.v6, p.mx, p.cname, p.foundOn
+		rd[i], sd[i] = p.registrable, p.isSubdomain
 	}
-	args := []interface{}{pq.Array(d), pq.Array(v4), pq.Array(v6), pq.Array(mx), pq.Array(cn), pq.Array(fo)}
+	args := []interface{}{pq.Array(d), pq.Array(v4), pq.Array(v6), pq.Array(mx), pq.Array(cn), pq.Array(fo), pq.Array(rd), pq.Array(sd)}
 	res, err := remote.Exec(diInsertSQL, args...)
 	if err != nil {
 		// remote down? spool to the local outbox instead of dropping the discovered domains.

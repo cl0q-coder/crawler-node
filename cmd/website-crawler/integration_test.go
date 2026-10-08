@@ -89,6 +89,7 @@ func TestIntegrationFakeSiteToDB(t *testing.T) {
 	defer cleanDomains(t, db, "%.integration")
 
 	addr := fakeSite(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -165,5 +166,58 @@ func TestNoLostBatchOnShutdown(t *testing.T) {
 	}
 	if count != n {
 		t.Errorf("website_info has %d no-loss rows, want %d — batch lost rows", count, n)
+	}
+}
+
+// HE-10: 304 validator refresh. A 304 that carries rotated validators must refresh the
+// stored copy on the crawled_at touch (RFC 7232 §4.1); a 304 that resends nothing must
+// leave the stored validators alone (never blank them).
+func TestIntegrationHE10304ValidatorRefresh(t *testing.T) {
+	db := testDB(t)
+	cleanDomains(t, db, "%.integration")
+	defer cleanDomains(t, db, "%.integration")
+	// The crawler adds this at startup (main.go ensure); the bare initdb schema lacks it.
+	if _, err := db.Exec(`ALTER TABLE domain_info ADD COLUMN IF NOT EXISTS recrawl_interval_days REAL`); err != nil {
+		t.Fatalf("ensure recrawl_interval_days: %v", err)
+	}
+
+	for _, d := range []string{"he10-304refresh.integration", "he10-304plain.integration"} {
+		if _, err := db.Exec(`INSERT INTO website_info (domain, etag, last_modified, content_length, status_code, crawled_at)
+			VALUES ($1, '"v1-old"', 'Wed, 07 Oct 2026 12:00:00 GMT', 20000, 200, now() - INTERVAL '10 days')`, d); err != nil {
+			t.Fatalf("seed %s: %v", d, err)
+		}
+	}
+
+	batch := []crawlOut{
+		{domain: "he10-304refresh.integration", notmod: true,
+			info: WebsiteInfo{NotModified: true, StatusCode: 304, ETag: `"v2-rotated"`}}, // Last-Modified NOT resent
+		{domain: "he10-304plain.integration", notmod: true,
+			info: WebsiteInfo{NotModified: true, StatusCode: 304}}, // no validators on the 304
+	}
+	flushBatch(db, nil, batch, nil, nil, nil, nil, nil)
+
+	var etag, lastmod string
+	var touched bool
+	row := db.QueryRow(`SELECT etag, last_modified, crawled_at > now() - INTERVAL '1 hour'
+		FROM website_info WHERE domain = 'he10-304refresh.integration'`)
+	if err := row.Scan(&etag, &lastmod, &touched); err != nil {
+		t.Fatalf("read back refresh row: %v", err)
+	}
+	if etag != `"v2-rotated"` {
+		t.Errorf("rotated etag = %q, want %q", etag, `"v2-rotated"`)
+	}
+	if lastmod != "Wed, 07 Oct 2026 12:00:00 GMT" {
+		t.Errorf("last_modified = %q, want stored value kept (304 did not resend it)", lastmod)
+	}
+	if !touched {
+		t.Error("crawled_at was not bumped on the 304 touch")
+	}
+
+	row = db.QueryRow(`SELECT etag, last_modified FROM website_info WHERE domain = 'he10-304plain.integration'`)
+	if err := row.Scan(&etag, &lastmod); err != nil {
+		t.Fatalf("read back plain row: %v", err)
+	}
+	if etag != `"v1-old"` || lastmod != "Wed, 07 Oct 2026 12:00:00 GMT" {
+		t.Errorf("plain 304 must not touch validators: got etag=%q lastmod=%q", etag, lastmod)
 	}
 }

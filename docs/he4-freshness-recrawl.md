@@ -1,11 +1,48 @@
 # HE-4: Freshness + Recrawl Scheduling — Design Note v1
 
-**Status:** Design proposal — for review before simulation/implementation.
+**Status:** §§1–6 implemented 2026-10-07 (branch `dutch/he4-freshness-recrawl`,
+PR #164) — see "Implementation" below. §7 still provisional (needs #135).
 **Author:** Dutch, 2026-10-07
 **Issue:** crawler-node #146. **Extends:** HE-1 distributed crawl coordination (#135).
 **Dependency note:** §7 (fleet scheduling) rides the HE-1 lease+heartbeat wire.
 #135 is still awaiting Claude Code's PROTOCOL v2 agreement, so §7 is
 **provisional**. §§1–6 are single-node and have no HE-1 dependency.
+
+## Implementation (2026-10-07)
+
+Shipped on `dutch/he4-freshness-recrawl` (PR crawler-node #164), all per the
+spec above:
+
+- **Schema** — `migrations/002_he4_freshness.sql`: `change_rate REAL`,
+  `next_score REAL`, `sitemap_lastmod TIMESTAMPTZ` (all NULL-able, lazily
+  backfilled) + partial btree `idx_domain_info_next_score WHERE next_score
+  IS NOT NULL`. Columns also ensured at startup (`ensureHe4Columns`).
+- **Signals** — `he4FetchVerdicts` reads stored SimHashes before the
+  website_info upsert; delta ≥8 bits = changed. 304s keep their verdict.
+  `sitemap_lastmod` persisted as a monotonic max on domain_info.
+- **Scoring** — `he4PriorityScore` = importance × (1-exp(-λ·age)) ×
+  (age/interval) × 2.0 sitemap boost; `change_rate` EWMA α=0.3 clamped to
+  [1/365, 2.0]; λ-aware T3 factors (tighten 0.5+0.25e^-λ, backoff
+  1.1+0.15(1-e^-λ)), driven by the SimHash verdict.
+- **Queue** — `selectFromSnapshot` draws `WHERE next_score IS NOT NULL ORDER
+  BY next_score DESC` (index range scan) with fallback to the legacy
+  unordered draw; `refreshRecrawlScores` sweeper (15-min cadence +
+  in-transaction clearing of just-crawled domains).
+- **Simulation** — `internal/recrawlsim`: (d) cuts importance-weighted lag
+  **67%** vs (a) at 800 fetches/day (0.59 vs 1.77 days), max overdue 1.97
+  (< 2×) in every importance decile — the §8 bar passes. Bonus: legacy T3's
+  validator-blind 200-tightening more than doubles crawl load (2297 vs 1116
+  fetches/day); SimHash verdicts fix it.
+- **Benchmarks** — Go-side scoring is 0.6–23 ns/op, zero allocs; the draw is
+  an index scan (EXPLAIN on prod-scale data is a deploy-time step).
+
+**Follow-up (do not block review):** the §8 sim exposed that the specified
+binary-observation EWMA converges to P(change per fetch), not changes/day —
+expected_gain is miscalibrated badly enough that the priority draw alone (b)
+underperforms uniform (2.75 vs 1.77d lag). An interval-censored Poisson MLE
+(λ̂ = -ln(1-f)/ā) fixes it (1.50 vs 1.77) but changes the specified update
+rule; the full stack (d) passes regardless via the 304 cost model. Tracked
+as a follow-up on #146 — needs a team decision before changing.
 
 ## 1. Problem
 

@@ -90,8 +90,8 @@ func TestHe4PriorityScore(t *testing.T) {
 		t.Errorf("importance: hi %v should exceed lo %v", hi, lo)
 	}
 	// Overdue (past interval) beats merely old: same age, shorter interval → higher P.
-	overdue := he4PriorityScore(10, 0.1, 60, 30, false)   // 2× overdue
-	notDue := he4PriorityScore(10, 0.1, 60, 120, false)   // 0.5× overdue
+	overdue := he4PriorityScore(10, 0.1, 60, 30, false) // 2× overdue
+	notDue := he4PriorityScore(10, 0.1, 60, 120, false) // 0.5× overdue
 	if overdue <= notDue {
 		t.Errorf("overdue %v should exceed not-due %v", overdue, notDue)
 	}

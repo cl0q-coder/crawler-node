@@ -1006,6 +1006,10 @@ func main() {
 	if _, err := db.Exec(`ALTER TABLE domain_info ADD COLUMN IF NOT EXISTS recrawl_interval_days REAL`); err != nil {
 		log.Printf("ensure recrawl_interval_days: %v", err)
 	}
+	// HE-4: freshness columns (change_rate, next_score, sitemap_lastmod) +
+	// the partial score index. Idempotent; CONCURRENTLY so the index build
+	// doesn't block the 13M+ row table.
+	ensureHe4Columns(db)
 	delStmt, err := db.Prepare(`DELETE FROM website_info WHERE domain = $1`)
 	if err != nil {
 		log.Fatalf("prepare delete: %v", err)
@@ -1050,6 +1054,13 @@ func main() {
 	loop := envBool("LOOP", false)
 	log.Printf("crawler start: workers=%d dials=%d db_pool=%d db_batch=%d timeout=%s host_delay=%s loop=%v emit=%v ua=%q",
 		workers, cap(dialSem), dbConns, dbBatch, fetchTimeout, tunables.HostDelay(), loop, emitStmt != nil, userAgent)
+
+	// HE-4: background score sweeper — materializes the recrawl priority into
+	// domain_info.next_score on the HE4_SWEEP_S cadence (default 15 min), with
+	// an initial run at startup so the score-ordered draw is populated from
+	// the first batch. Stops with the crawler's shutdown context. Started
+	// before the PIPELINE branch so both crawl loops get it.
+	go he4SweepLoop(ctx, db, float64(recrawlDays()))
 
 	// PIPELINE=1: continuous pipelined crawl (no per-batch barrier — see crawlContinuous).
 	// Only meaningful in LOOP mode; it runs forever. Default off → the proven batch path below.
@@ -1284,22 +1295,45 @@ func selectFromSnapshot(db *sql.DB, pool, recrawl, maxPerBatch, maxReturn int) (
 	if err != nil {
 		return nil, err
 	}
-	// Recrawl-due rows: an index range scan on idx_domain_info_web_crawled_at (empty until the first rows age past
-	// their interval), with the stored validators for conditional GETs.
-	// T3: per-domain adaptive interval (recrawl_interval_days, NULL = global RECRAWL_DAYS).
+	// Recrawl-due rows: HE-4 score-ordered draw from the sweeper-maintained
+	// next_score (partial index idx_domain_info_next_score) — an index range
+	// scan on the materialized priority P, not a full sort. Falls back to the
+	// legacy unordered draw when the sweeper hasn't scored anything yet
+	// (fresh node / first run after deploy).
+	// T3: per-domain adaptive interval (recrawl_interval_days, NULL = global RECRAWL_DAYS)
+	// is baked into next_score by the sweeper via the due predicate.
 	rows, err := db.Query(`WITH picked AS (
 			SELECT domain, coalesce(btrim(split_part(ip_addresses_ipv4, ',', 1)), '') AS ip
-			  FROM domain_info WHERE web_crawled_at < NOW() - make_interval(days => COALESCE(recrawl_interval_days, $1)) AND dns_fail_count < 3 LIMIT $2)
+			  FROM domain_info WHERE next_score IS NOT NULL ORDER BY next_score DESC LIMIT $1)
 		SELECT p.domain, p.ip, coalesce(a.org, ''), wi.etag, wi.last_modified
 		  FROM picked p
 		  LEFT JOIN asninfo a ON a.ip = nullif(p.ip, '')
-		  LEFT JOIN website_info wi ON wi.domain = p.domain`, recrawl, pool)
+		  LEFT JOIN website_info wi ON wi.domain = p.domain`, pool)
 	if err != nil {
 		return nil, err
 	}
 	stale, err := scanTargets(rows, true)
 	if err != nil {
 		return nil, err
+	}
+	if len(stale) == 0 {
+		// Sweeper hasn't scored anything yet — legacy unordered draw so a
+		// fresh node still recrawls instead of idling.
+		log.Printf("select: next_score empty — falling back to legacy unordered recrawl draw")
+		rows, err := db.Query(`WITH picked AS (
+			SELECT domain, coalesce(btrim(split_part(ip_addresses_ipv4, ',', 1)), '') AS ip
+			  FROM domain_info WHERE web_crawled_at < NOW() - make_interval(days => COALESCE(recrawl_interval_days, $1)) AND dns_fail_count < 3 LIMIT $2)
+		SELECT p.domain, p.ip, coalesce(a.org, ''), wi.etag, wi.last_modified
+		  FROM picked p
+		  LEFT JOIN asninfo a ON a.ip = nullif(p.ip, '')
+		  LEFT JOIN website_info wi ON wi.domain = p.domain`, recrawl, pool)
+		if err != nil {
+			return nil, err
+		}
+		stale, err = scanTargets(rows, true)
+		if err != nil {
+			return nil, err
+		}
 	}
 	frontierSnap.mu.Lock()
 	left := len(frontierSnap.rows)
@@ -2071,6 +2105,18 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 	sort.Strings(notmod)
 	sort.Strings(all)
 
+	// HE-4: SimHash-delta change verdicts. Must run BEFORE the website_info
+	// upsert below overwrites the stored fingerprints. Skipped on the spool
+	// path (skipStamp: the local outbox has no domain_info to update).
+	var verdicts *he4Verdicts
+	if !skipStamp {
+		var verr error
+		verdicts, verr = he4FetchVerdicts(ctx, tx, good)
+		if verr != nil {
+			return 0, verr
+		}
+	}
+
 	// 1) multi-row upsert (ON CONFLICT refresh) for everything not blacklisted.
 	if len(good) > 0 {
 		const nc = 34
@@ -2124,32 +2170,27 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 
 	// 3) stamp EVERY attempted domain (crawl-state marker). Skipped when spooling to the local
 	//    outbox, whose domain_info has no web_crawled_at and where stamps aren't worth replaying.
-	//    T3: adaptive recrawl interval — 304s (unchanged) back off ×1.25 (cap 30d);
-	//    successful 200s (changed) shorten ×0.75 (floor 1d). Failures keep the
-	//    current interval. NULL interval means "global RECRAWL_DAYS".
+	//    HE-4: the change-rate EWMA + λ-aware T3 interval (SimHash-delta verdicts)
+	//    + sitemap_lastmod persist replace the old constant-factor T3 updates.
+	//    304s (unchanged) back off (softer for slow changers, cap 30d);
+	//    SimHash-changed 200s tighten (harder for fast changers, floor 1d).
+	//    Failures keep the current interval. NULL interval means "global RECRAWL_DAYS".
 	if !skipStamp {
 		defInterval := float64(recrawlDays())
-		if len(notmod) > 0 {
-			if _, err := tx.ExecContext(ctx, `UPDATE domain_info
-				SET web_crawled_at = now(),
-				    recrawl_interval_days = LEAST(COALESCE(recrawl_interval_days, $2) * 1.25, 30)
-				WHERE domain = ANY($1)`, pq.Array(notmod), defInterval); err != nil {
-				return 0, err
-			}
+		if err := he4UpdateSignals(ctx, tx, verdicts, notmod, defInterval); err != nil {
+			return 0, err
 		}
+		// HE-4: just-attempted domains are no longer due — clear their
+		// materialized scores in the same transaction so the queue never
+		// re-serves a domain we just fetched.
+		if err := he4ClearScores(ctx, tx, all); err != nil {
+			return 0, err
+		}
+		// Domains neither 304 nor 200 (failures, etc.): stamp only, keep interval.
 		goodDomains := make([]string, 0, len(good))
 		for _, b := range good {
 			goodDomains = append(goodDomains, b.domain)
 		}
-		if len(goodDomains) > 0 {
-			if _, err := tx.ExecContext(ctx, `UPDATE domain_info
-				SET web_crawled_at = now(),
-				    recrawl_interval_days = GREATEST(COALESCE(recrawl_interval_days, $2) * 0.75, 1)
-				WHERE domain = ANY($1)`, pq.Array(goodDomains), defInterval); err != nil {
-				return 0, err
-			}
-		}
-		// Domains neither 304 nor 200 (failures, etc.): stamp only, keep interval.
 		rest := make([]string, 0, len(all)-len(notmod)-len(goodDomains))
 		inNotmod := make(map[string]bool, len(notmod))
 		for _, d := range notmod {

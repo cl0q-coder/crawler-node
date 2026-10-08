@@ -94,7 +94,9 @@ func he4NewChangeRate(old float64, changed bool) float64 {
 // importance  = opic_history + opic_cash (link-earned importance)
 // expected_gain = 1 - exp(-λ·age_days)  (Poisson P(changed since our copy))
 // overdue     = age_days / interval_days (starvation guard: low-λ pages still
-//               get crawled, on their long interval)
+//
+//	get crawled, on their long interval)
+//
 // sitemapHint multiplies by he4SitemapBoost when the sitemap lastmod is
 // newer than our copy — a pre-fetch promotion, not ground truth.
 func he4PriorityScore(importance, lambda, ageDays, intervalDays float64, sitemapHint bool) float64 {
@@ -164,9 +166,9 @@ func t3NextIntervalLambda(current float64, changed bool, lambda float64, def flo
 // SimHash-delta change verdict. Computed BEFORE the website_info upsert —
 // after it, the stored fingerprint is already the fresh one.
 type he4Verdicts struct {
-	changed   []string          // 200, SimHash delta >= 8: observed change
-	unchanged []string          // 200, SimHash delta < 8: observed no-change
-	unknown   []string          // 200, fingerprint comparison impossible (legacy path)
+	changed   []string             // 200, SimHash delta >= 8: observed change
+	unchanged []string             // 200, SimHash delta < 8: observed no-change
+	unknown   []string             // 200, fingerprint comparison impossible (legacy path)
 	sitemap   map[string]time.Time // domain → newest sitemap lastmod seen this batch
 }
 

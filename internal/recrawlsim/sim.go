@@ -6,6 +6,23 @@
 // This is a test harness, not production infrastructure. The change process
 // is generated once per run (seeded) and replayed identically for every
 // policy, so policy differences are the only source of variance.
+//
+// Modeling fidelity notes (what the sim models vs the real node):
+//   - (a) "today": unordered draw + legacy T3 (fixed ×0.75 on any 200,
+//     ×1.25 on 304, cap 30d) on 200/304 verdicts. Servers that send no
+//     usable validators can never 304, so legacy T3 misreads their
+//     unchanged 200s as "changed" and tightens — the misclassification
+//     §3.2's SimHash verdict fixes.
+//   - (b)-(d): the §4/§5 stack as specified — binary-observation EWMA for
+//     change_rate (mirrors he4NewChangeRate in cmd/website-crawler/he4.go),
+//     λ-aware T3 factors on the SimHash verdict (modeled as perfect), and
+//     the P = importance × expected_gain × overdue draw with the sitemap
+//     boost. Per the design's policy ladder, (a)-(c) pay full fetch cost
+//     while (d) pays 0.1 for unchanged (304) fetches.
+//   - Known simplification: the design claims the T3 interval "converges to
+//     ≈1/λ"; the multiplicative dynamics actually converge to ≈0.3/λ (the
+//     fixed point where P(change per fetch) ≈ 25%). The sim models the
+//     dynamics, not the claim.
 package recrawlsim
 
 import (
@@ -29,28 +46,30 @@ var workloadMix = []mixClass{
 }
 
 const (
-	priorLambda  = 1.0 / 120 // §4 default change-rate prior (changes/day)
-	ewmaAlpha    = 0.3       // §4 EWMA learning rate for change_rate
-	lambdaMin    = 1.0 / 365
-	lambdaMax    = 2.0
-	intervalMin  = 1.0   // days (T3 floor)
-	intervalMax  = 120.0 // days (RECRAWL_DAYS global floor)
-	fetchCost    = 1.0
-	notModCost   = 0.1  // 304: zero content cost (design note §8)
-	sitemapBoost = 3.0  // pre-fetch promotion multiplier for a fresh lastmod hint
-	sitemapTrust = 0.70 // fraction of domains with a reliable sitemap lastmod
+	priorLambda        = 1.0 / 120 // §4 default change-rate prior (changes/day)
+	ewmaAlpha          = 0.3       // §4 EWMA learning rate for change_rate
+	lambdaMin          = 1.0 / 365
+	lambdaMax          = 2.0
+	recrawlDefaultDays = 120.0 // RECRAWL_DAYS: initial interval (NULL recrawl_interval_days)
+	intervalFloor      = 1.0   // T3 floor (days)
+	intervalCap        = 30.0  // T3 cap (days)
+	fetchCost          = 1.0
+	notModCost         = 0.1  // 304: zero content cost (design note §8)
+	sitemapBoost       = 2.0  // matches he4SitemapBoost in prod
+	sitemapTrust       = 0.70 // fraction of domains with a reliable sitemap lastmod
+	validatorFrac      = 0.70 // fraction of domains whose servers send usable validators
 )
 
 // Policy is one of the four scheduling stacks compared in §8.
 type Policy int
 
 const (
-	// PolicyUniform is (a): today's unordered LIMIT draw — no learning, no
-	// prioritization, global 120d recrawl floor, full fetch cost always.
+	// PolicyUniform is (a): today's unordered LIMIT draw + legacy T3 —
+	// no learning, no prioritization, full fetch cost always.
 	PolicyUniform Policy = iota
 	// PolicyPriority is (b): §5 priority draw P = importance ×
-	// expected_gain × overdue, with the change_rate EWMA learned from
-	// fetch verdicts and T3-style adaptive intervals.
+	// expected_gain × overdue, with the §4 change_rate EWMA learned from
+	// SimHash verdicts and λ-aware T3 intervals.
 	PolicyPriority
 	// PolicySitemap is (c): (b) + sitemap-lastmod pre-fetch promotion.
 	PolicySitemap
@@ -75,10 +94,11 @@ func (p Policy) String() string {
 // domain is one synthetic crawled page (domain-granular, per the survey:
 // website-crawler recrawls homepages, not URLs).
 type domain struct {
-	importance float64 // Zipf: 1/rank
-	lambda     float64 // true changes/day (hidden from the scheduler)
-	changes    []int   // sorted days on which the page truly changed
-	sitemapOK  bool    // sitemap lastmod is a reliable staleness hint
+	importance    float64 // Zipf: 1/rank
+	lambda        float64 // true changes/day (hidden from the scheduler)
+	changes       []int   // sorted days on which the page truly changed
+	sitemapOK     bool    // sitemap lastmod is a reliable staleness hint
+	hasValidators bool    // server sends ETag/Last-Modified → 304 possible
 }
 
 // workload is a fixed synthetic web, generated once and replayed per policy.
@@ -91,7 +111,8 @@ type workload struct {
 }
 
 // generate builds the synthetic web: Zipf importance, mixed Poisson change
-// processes, 70% reliable sitemap lastmods. Deterministic for a seed.
+// processes, 70% reliable sitemap lastmods, 70% validator support.
+// Deterministic for a seed.
 func generate(nDomains, days int, seed int64) *workload {
 	rng := rand.New(rand.NewSource(seed))
 	w := &workload{days: days, initCrawl: make([]int, nDomains), decile: make([]int, nDomains)}
@@ -125,13 +146,14 @@ func generate(nDomains, days int, seed int64) *workload {
 			ch = append(ch, day)
 		}
 		w.domains[i] = domain{
-			importance: 1.0 / float64(i+1), // rank i+1, Zipf
-			lambda:     lam,
-			changes:    ch,
-			sitemapOK:  rng.Float64() < sitemapTrust,
+			importance:    1.0 / float64(i+1), // rank i+1, Zipf
+			lambda:        lam,
+			changes:       ch,
+			sitemapOK:     rng.Float64() < sitemapTrust,
+			hasValidators: rng.Float64() < validatorFrac,
 		}
 		w.impSum += w.domains[i].importance
-		w.initCrawl[i] = -rng.Intn(int(intervalMax)) // staggered start: due spread over 120d
+		w.initCrawl[i] = -rng.Intn(int(recrawlDefaultDays)) // staggered start
 	}
 	// Deciles by importance rank (0 = top decile). Importance is 1/(i+1) so
 	// rank order == index order.
@@ -174,15 +196,18 @@ func clamp(x, lo, hi float64) float64 {
 type Config struct {
 	Budget float64 // fetch-cost units available per day
 	Seed   int64   // shuffle seed for the uniform policy
+	Warmup int     // days before metrics start accumulating (state still evolves)
 }
 
 // Metrics collected over a run.
 type Metrics struct {
-	LagDays    float64     // mean importance-weighted staleness, in days (§8)
-	Fetches    int         // total fetches issued
-	SpentTotal float64     // total budget units spent
-	Spent304   float64     // budget units spent on unchanged (304) fetches
-	MaxOverdue [10]float64 // max age/interval per importance decile (starvation check)
+	LagDays    float64             // mean importance-weighted staleness, in days (§8)
+	LagByClass map[float64]float64 // ... per true-λ class (diagnostic)
+	Fetches    int                 // total fetches issued
+	SpentTotal float64             // total budget units spent
+	Spent304   float64             // budget units spent on unchanged (304) fetches
+	MaxOverdue [10]float64         // max age/interval per importance decile (starvation check)
+	measured   int                 // days the lag metric accumulated over
 }
 
 // Pct304 returns the share of budget spent on unchanged fetches.
@@ -194,39 +219,62 @@ func (m Metrics) Pct304() float64 {
 }
 
 type schedState struct {
-	lamHat    float64 // current change_rate estimate (changes/day)
-	chgFrac   float64 // EWMA of P(fetch observed a change)
-	fetchGap  float64 // EWMA of days between fetches
+	lamHat    float64 // change_rate estimate: binary-observation EWMA (§4)
+	interval  float64 // T3 adaptive recrawl interval, days
 	lastCrawl int
 }
 
 func newSchedState() schedState {
-	// Consistent with the prior: a domain fetched every 120d whose fetches
-	// observe a change with P = 1-exp(-1) has λ̂ = 1/120.
-	return schedState{
-		lamHat:    priorLambda,
-		chgFrac:   1 - math.Exp(-1),
-		fetchGap:  intervalMax,
-		lastCrawl: 0,
-	}
+	return schedState{lamHat: priorLambda, interval: recrawlDefaultDays, lastCrawl: 0}
 }
 
-// learn updates the change_rate estimate from one fetch verdict.
-// The verdict is interval-censored (we only know "changed at least once in
-// `age` days"), so the estimator is the Poisson MLE λ̂ = -ln(1-f)/ā from the
-// EWMA changed-fraction f and EWMA fetch interval ā — not the naive 1/age,
-// which is a fixed point of due-triggered fetching and never converges.
-func (s *schedState) learn(changed bool, age int) {
-	if age < 1 {
-		age = 1
-	}
-	f := 0.0
+// learn applies one binary fetch verdict to the change_rate EWMA.
+// Mirrors he4NewChangeRate in cmd/website-crawler/he4.go: the estimator the
+// design specifies (not the interval-censored Poisson MLE, which would be
+// better calibrated — filed as a follow-up on #146).
+func (s *schedState) learn(changed bool) {
+	obs := 0.0
 	if changed {
-		f = 1.0
+		obs = 1.0
 	}
-	s.chgFrac = (1-ewmaAlpha)*s.chgFrac + ewmaAlpha*f
-	s.fetchGap = (1-ewmaAlpha)*s.fetchGap + ewmaAlpha*float64(age)
-	s.lamHat = clamp(-math.Log(1-s.chgFrac)/s.fetchGap, lambdaMin, lambdaMax)
+	s.lamHat = clamp((1-ewmaAlpha)*s.lamHat+ewmaAlpha*obs, lambdaMin, lambdaMax)
+}
+
+// adaptT3 applies the multiplicative interval update. legacy=true reproduces
+// today's T3 (fixed ×0.75 on any 200, ×1.25 on 304); otherwise the HE-4
+// λ-aware factors driven by the SimHash verdict (mirrors the SQL in
+// he4UpdateSignals / t3NextIntervalLambda).
+func (s *schedState) adaptT3(legacy bool, changed bool) {
+	if legacy {
+		if changed {
+			s.interval *= 0.75
+		} else {
+			s.interval *= 1.25
+		}
+	} else {
+		if changed {
+			s.interval *= 0.5 + 0.25*math.Exp(-s.lamHat)
+		} else {
+			s.interval *= 1.1 + 0.15*(1-math.Exp(-s.lamHat))
+		}
+	}
+	s.interval = clamp(s.interval, intervalFloor, intervalCap)
+}
+
+// priorityScore renders he4PriorityScore for the sim's per-domain state.
+func (s *schedState) priorityScore(importance float64, age int, hinted bool) float64 {
+	lam := s.lamHat
+	if lam <= 0 {
+		lam = priorLambda
+	}
+	ageDays := float64(age)
+	gain := 1 - math.Exp(-lam*ageDays)
+	overdue := ageDays / s.interval
+	p := importance * gain * overdue
+	if hinted {
+		p *= sitemapBoost
+	}
+	return p
 }
 
 // Run executes one policy against the workload and returns its metrics.
@@ -238,6 +286,7 @@ func Run(w *workload, pol Policy, cfg Config) Metrics {
 		st[i].lastCrawl = w.initCrawl[i]
 	}
 	var m Metrics
+	m.LagByClass = map[float64]float64{}
 	rng := rand.New(rand.NewSource(cfg.Seed))
 
 	type cand struct {
@@ -251,24 +300,14 @@ func Run(w *workload, pol Policy, cfg Config) Metrics {
 		due = due[:0]
 		for i, d := range w.domains {
 			s := &st[i]
-			age := float64(day - s.lastCrawl)
-			var interval float64
-			if pol == PolicyUniform {
-				interval = intervalMax // today's global RECRAWL_DAYS floor
-			} else {
-				interval = clamp(1/s.lamHat, intervalMin, intervalMax)
-			}
-			if age < interval {
+			age := day - s.lastCrawl
+			if float64(age) < s.interval {
 				continue // not due
 			}
 			p := 0.0
 			if pol != PolicyUniform {
-				overdue := age / interval
-				gain := 1 - math.Exp(-s.lamHat*age) // expected_gain (§4)
-				p = d.importance * gain * overdue
-				if (pol == PolicySitemap || pol == PolicyFull) && d.hinted(day, s.lastCrawl) {
-					p *= sitemapBoost
-				}
+				p = s.priorityScore(d.importance, age,
+					(pol == PolicySitemap || pol == PolicyFull) && d.hinted(day, s.lastCrawl))
 			}
 			due = append(due, cand{idx: i, p: p})
 		}
@@ -281,9 +320,6 @@ func Run(w *workload, pol Policy, cfg Config) Metrics {
 		// 2. Spend the daily budget in draw order.
 		remaining := cfg.Budget
 		for _, c := range due {
-			if remaining < fetchCost && !(pol == PolicyFull && remaining >= notModCost) {
-				break
-			}
 			i := c.idx
 			d := &w.domains[i]
 			s := &st[i]
@@ -301,40 +337,50 @@ func Run(w *workload, pol Policy, cfg Config) Metrics {
 			if !changed {
 				m.Spent304 += cost
 			}
-			// 3. Learn: interval-censored Poisson MLE on the fetch verdict (§4).
-			if pol != PolicyUniform {
-				st[i].learn(changed, day-s.lastCrawl)
+			// 3. Learn from the fetch verdict and adapt the interval.
+			if pol == PolicyUniform {
+				// Legacy T3 sees 200/304, not truth: an unchanged page
+				// without validators returns 200 and mis-tightens.
+				s.adaptT3(true, changed || !d.hasValidators)
+			} else {
+				// HE-4: SimHash verdict (modeled as truth) drives both the
+				// EWMA and the λ-aware T3 factors.
+				s.learn(changed)
+				s.adaptT3(false, changed)
 			}
 			s.lastCrawl = day
 		}
 
-		// 4. Accumulate importance-weighted staleness (§8 lag metric).
-		for i, d := range w.domains {
-			lc := d.lastChangeDay(day)
-			if lc > st[i].lastCrawl {
-				m.LagDays += d.importance * float64(day-lc)
+		// 4. Accumulate importance-weighted staleness (§8 lag metric),
+		// after the warmup period.
+		if day >= cfg.Warmup {
+			m.measured++
+			for i, d := range w.domains {
+				lc := d.lastChangeDay(day)
+				if lc > st[i].lastCrawl {
+					stale := d.importance * float64(day-lc)
+					m.LagDays += stale
+					m.LagByClass[d.lambda] += stale
+				}
 			}
 		}
 	}
 
-	m.LagDays /= float64(w.days) * w.impSum
+	if m.measured > 0 {
+		m.LagDays /= float64(m.measured) * w.impSum
+		for lam, v := range m.LagByClass {
+			m.LagByClass[lam] = v / float64(m.measured) / w.impSum
+		}
+	}
 
 	// 5. Starvation check: max overdue per importance decile at end of run.
 	for i := range w.domains {
 		s := &st[i]
-		age := float64(w.days - s.lastCrawl)
-		var interval float64
-		if pol == PolicyUniform {
-			interval = intervalMax
-		} else {
-			interval = clamp(1/s.lamHat, intervalMin, intervalMax)
-		}
-		od := age / interval
+		od := float64(w.days-s.lastCrawl) / s.interval
 		dec := w.decile[i]
 		if od > m.MaxOverdue[dec] {
 			m.MaxOverdue[dec] = od
 		}
 	}
-	_ = n
 	return m
 }

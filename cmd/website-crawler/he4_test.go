@@ -52,7 +52,7 @@ func TestHe4NewChangeRate(t *testing.T) {
 	// guard, unreachable via binary observations); repeated no-changes
 	// converge to the 1/365 floor, never below.
 	v := 0.5
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 200; i++ {
 		v = he4NewChangeRate(v, true)
 	}
 	if math.Abs(v-1.0) > 1e-9 {

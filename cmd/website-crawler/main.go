@@ -35,7 +35,7 @@ package main
 //
 // WRITES: one transaction per batch — a multi-row upsert into website_info, a delete of blacklisted domains
 // (cl0q_blacklist), a crawled_at touch for 304 Not Modified (conditional GET with the stored ETag /
-// Last-Modified), the web_crawled_at stamp, and (EMIT_DOMAINS=1) newly seen external domains into domain_info.
+// Last-Modified — rotated validators on the 304 refresh the stored copy, HE-10), the web_crawled_at stamp, and (EMIT_DOMAINS=1) newly seen external domains into domain_info.
 // NUL bytes are stripped from every field (Postgres rejects them in text).
 //
 // SHUTDOWN: SIGTERM / SIGINT stop handing out new work; fetches already in flight finish and their results are written
@@ -240,6 +240,9 @@ var fpChecker *footprint.Checker // NR3: nil until main() opens the DB
 // NR6: observability. Initialized in main(); nil in tests that don't call it.
 var mreg *metrics.Registry
 var mCrawledOK, mCrawledFailed, mCrawledSkipped, mCrawledChallenged, mCrawledUnchanged, mCrawledDeferred, mCrawledBlocked, mCrawledDuplicates, mSitemapFound, mTrapsFlagged *atomic.Int64
+
+// HE-10: conditional-fetch observability — attempts, conditional coverage, bytes saved.
+var mFetchAttempts, mConditionalReqs, mBytesSaved *atomic.Int64
 
 // OP4: Daily counters for node-runner "what did my node do today" view.
 var dailyTracker = daily.New()
@@ -468,6 +471,9 @@ type target struct {
 	// attempts it despite the open breaker via admitCanary; the outcome
 	// routes through the breaker's probe-aware fail()/success().
 	probe bool
+	// contentLen is the stored website_info.content_length from the last full fetch —
+	// the body bytes a 304 lets us skip (HE-10 bytes-saved accounting).
+	contentLen int64
 }
 
 // groupKey is the backoff/cap bucket for a target: prefer the ASN org (so a whole
@@ -942,6 +948,10 @@ func main() {
 	mFrontierDrained = mreg.Counter("crawler_frontier_drained_total", "HE-6: never-crawled domains attempted (left the unknown frontier)")
 	mFrontierUnknown = mreg.Gauge("crawler_frontier_unknown", "HE-6: never-crawled domains (web_crawled_at IS NULL AND dns_fail_count < 3); sampled at frontier snapshot reload")
 	mSitemapURLs = mreg.Counter("crawler_sitemap_urls_total", "T1: domains discovered via sitemaps")
+	// HE-10: conditional-fetch observability.
+	mFetchAttempts = mreg.Counter("crawler_fetch_attempts_total", "HE-10: homepage fetch attempts")
+	mConditionalReqs = mreg.Counter("crawler_conditional_requests_total", "HE-10: fetches sent with If-None-Match/If-Modified-Since")
+	mBytesSaved = mreg.Counter("crawler_bytes_saved_total", "HE-10: body bytes skipped via 304 Not Modified")
 	// cachedCount runs the query at most once per 60s; gauges scrape often
 	// and COUNT(*) on 13M+ row tables is expensive.
 	cachedCount := func(key, query string) func() int64 {
@@ -1237,7 +1247,7 @@ func selectTargets(db *sql.DB) ([]target, error) {
 	}
 	if n := envInt("SAMPLE", 0); n > 0 {
 		// TABLESAMPLE is fast random-ish (avoids ORDER BY random() full sort).
-		rows, err := db.Query(`SELECT domain, etag, last_modified FROM website_info TABLESAMPLE SYSTEM (0.2) WHERE domain IS NOT NULL LIMIT $1`, n)
+		rows, err := db.Query(`SELECT domain, etag, last_modified, content_length FROM website_info TABLESAMPLE SYSTEM (0.2) WHERE domain IS NOT NULL LIMIT $1`, n)
 		if err != nil {
 			return nil, err
 		}
@@ -1296,7 +1306,7 @@ func selectTargets(db *sql.DB) ([]target, error) {
 	// wi join is a per-pooled-row lookup on website_info's UNIQUE(domain) — cheap — and pulls the
 	// stored validators so recrawls can go conditional (NULL etag/last_modified → full fetch).
 	q := `WITH picked AS (` + picked + `)
-		SELECT p.domain, p.ip, coalesce(a.org, ''), wi.etag, wi.last_modified
+		SELECT p.domain, p.ip, coalesce(a.org, ''), wi.etag, wi.last_modified, wi.content_length
 		  FROM picked p
 		  LEFT JOIN asninfo a ON a.ip = nullif(p.ip, '')
 		  LEFT JOIN website_info wi ON wi.domain = p.domain`
@@ -1521,7 +1531,7 @@ func selectFromSnapshot(db *sql.DB, pool, recrawl, maxPerBatch, maxReturn int) (
 	rows, err := db.Query(`WITH picked AS (
 			SELECT domain, coalesce(btrim(split_part(ip_addresses_ipv4, ',', 1)), '') AS ip
 			  FROM domain_info WHERE next_score IS NOT NULL ORDER BY next_score DESC LIMIT $1)
-		SELECT p.domain, p.ip, coalesce(a.org, ''), wi.etag, wi.last_modified
+		SELECT p.domain, p.ip, coalesce(a.org, ''), wi.etag, wi.last_modified, wi.content_length
 		  FROM picked p
 		  LEFT JOIN asninfo a ON a.ip = nullif(p.ip, '')
 		  LEFT JOIN website_info wi ON wi.domain = p.domain`, pool)
@@ -1539,7 +1549,7 @@ func selectFromSnapshot(db *sql.DB, pool, recrawl, maxPerBatch, maxReturn int) (
 		rows, err := db.Query(`WITH picked AS (
 			SELECT domain, coalesce(btrim(split_part(ip_addresses_ipv4, ',', 1)), '') AS ip
 			  FROM domain_info WHERE web_crawled_at < NOW() - make_interval(days => COALESCE(recrawl_interval_days, $1)) AND dns_fail_count < 3 LIMIT $2)
-		SELECT p.domain, p.ip, coalesce(a.org, ''), wi.etag, wi.last_modified
+		SELECT p.domain, p.ip, coalesce(a.org, ''), wi.etag, wi.last_modified, wi.content_length
 		  FROM picked p
 		  LEFT JOIN asninfo a ON a.ip = nullif(p.ip, '')
 		  LEFT JOIN website_info wi ON wi.domain = p.domain`, recrawl, pool)
@@ -1559,23 +1569,25 @@ func selectFromSnapshot(db *sql.DB, pool, recrawl, maxPerBatch, maxReturn int) (
 }
 
 // scanTargets reads (domain[, ip, org]) rows into targets. withInfra selects the enriched
-// 3-column shape; otherwise a bare domain list (SAMPLE mode).
+// 6-column shape; otherwise a bare domain list (SAMPLE mode) with validators + content_length.
 func scanTargets(rows *sql.Rows, withInfra bool) ([]target, error) {
 	defer rows.Close()
 	var out []target
 	for rows.Next() {
 		var t target
 		var etag, lastMod sql.NullString
+		var clen sql.NullInt64
 		if withInfra {
-			if err := rows.Scan(&t.domain, &t.ip, &t.org, &etag, &lastMod); err != nil {
+			if err := rows.Scan(&t.domain, &t.ip, &t.org, &etag, &lastMod, &clen); err != nil {
 				return nil, err
 			}
 		} else {
-			if err := rows.Scan(&t.domain, &etag, &lastMod); err != nil {
+			if err := rows.Scan(&t.domain, &etag, &lastMod, &clen); err != nil {
 				return nil, err
 			}
 		}
 		t.etag, t.lastModified = etag.String, lastMod.String
+		t.contentLen = clen.Int64
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -2008,6 +2020,14 @@ type crawlOut struct {
 	notmod bool        // 304 Not Modified → touch crawled_at only, don't rewrite the row
 }
 
+// notmodRefresh is a 304 whose response carried rotated validators — the flush touch
+// refreshes the stored copy (HE-10, RFC 7232 §4.1) instead of letting it go stale.
+type notmodRefresh struct {
+	domain  string
+	etag    string
+	lastMod string
+}
+
 const upsertHead = `INSERT INTO website_info (domain,title,description,keywords,canonical,h1,status_code,content_type,content_length,latency_ms,redirects,outbound_links,image_count,word_count,charset,robots,og_title,og_image,twitter_card,page_language,server_header,fetch_error,etag,last_modified,simhash,simhash_b0,simhash_b1,simhash_b2,simhash_b3,duplicate_of,sitemap_urls,sitemap_lastmod,domains_emitted_total,trap_suspect,crawled_at) VALUES `
 
 // IG2: findDuplicate checks if a SimHash fingerprint is a near-duplicate of an
@@ -2311,7 +2331,10 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 	defer tx.Rollback() // no-op after a successful Commit
 
 	good := make([]crawlOut, 0, len(batch))
-	var bad, notmod, all []string
+	var bad, notmod, notmodPlain, all []string
+	// HE-10: 304s whose response carried rotated validators — their flush touch also
+	// refreshes the stored copy (RFC 7232 §4.1).
+	var notmodRef []notmodRefresh
 	// IG2: batch near-duplicate check (single query, not N+1).
 	var simhashes []uint64
 	for _, b := range batch {
@@ -2327,6 +2350,13 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 			bad = append(bad, b.domain)
 		case b.notmod:
 			notmod = append(notmod, b.domain)
+			// HE-10: the 304 carried rotated validators → refresh the stored copy on touch.
+			// A 304 that resent nothing leaves the stored validators alone.
+			if b.info.ETag != "" || b.info.LastModified != "" {
+				notmodRef = append(notmodRef, notmodRefresh{domain: b.domain, etag: b.info.ETag, lastMod: b.info.LastModified})
+			} else {
+				notmodPlain = append(notmodPlain, b.domain)
+			}
 		default:
 			// IG2: check for near-duplicates before storing.
 			if b.info.SimHash != 0 {
@@ -2347,6 +2377,8 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 	sort.Slice(good, func(i, j int) bool { return good[i].domain < good[j].domain })
 	sort.Strings(bad)
 	sort.Strings(notmod)
+	sort.Strings(notmodPlain)
+	sort.Slice(notmodRef, func(i, j int) bool { return notmodRef[i].domain < notmodRef[j].domain })
 	sort.Strings(all)
 
 	// HE-4: SimHash-delta change verdicts. Must run BEFORE the website_info
@@ -2404,13 +2436,36 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 		}
 	}
 
-	// 2b) 304 Not Modified → content unchanged; refresh crawled_at only, leave the row intact.
+	// 2b) 304 Not Modified → content unchanged; refresh crawled_at, leave the row intact.
+	//     HE-10: when the 304 carried rotated validators (RFC 7232 §4.1), refresh the stored
+	//     copy too — but never blank a stored validator the 304 didn't resend (NULLIF guard).
 	//     (On the local spool DB the row usually isn't present → a harmless 0-row update.)
 	//     batch304Touch is the separate option-(a) statement: 304s never enter
 	//     the multi-row upsert above, so a zero/empty fingerprint can never
-	//     clobber the stored simhash/duplicate_of.
-	if len(notmod) > 0 {
-		if _, err := tx.ExecContext(ctx, batch304Touch, pq.Array(notmod)); err != nil {
+	//     clobber the stored simhash/duplicate_of. The rotated-validator
+	//     UPDATE below is inline: etag/last_modified are validator metadata,
+	//     not content, and its NULLIF guard never blanks a stored validator
+	//     the 304 didn't resend.
+	if len(notmodRef) > 0 {
+		domains := make([]string, 0, len(notmodRef))
+		etags := make([]string, 0, len(notmodRef))
+		lastmods := make([]string, 0, len(notmodRef))
+		for _, r := range notmodRef {
+			domains = append(domains, r.domain)
+			etags = append(etags, r.etag)
+			lastmods = append(lastmods, r.lastMod)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE website_info AS wi SET crawled_at = now(),
+			etag = COALESCE(NULLIF(v.etag, ''), wi.etag),
+			last_modified = COALESCE(NULLIF(v.lastmod, ''), wi.last_modified)
+			FROM (SELECT unnest($1::text[]) AS domain, unnest($2::text[]) AS etag, unnest($3::text[]) AS lastmod) AS v
+			WHERE wi.domain = v.domain`,
+			pq.Array(domains), pq.Array(etags), pq.Array(lastmods)); err != nil {
+			return 0, err
+		}
+	}
+	if len(notmodPlain) > 0 {
+		if _, err := tx.ExecContext(ctx, batch304Touch, pq.Array(notmodPlain)); err != nil {
 			return 0, err
 		}
 	}
@@ -2564,6 +2619,8 @@ func flushRowByRow(batch []crawlOut, upsert, delStmt, stampStmt, emitStmt, touch
 			}
 		case b.notmod:
 			// 304 → content unchanged; bump crawled_at without touching the stored row.
+			// HE-10 note: the 304 validator-refresh runs in the batch path only; this rare
+			// fallback keeps the plain touch (validators refresh on the next good batch).
 			if _, err := touchStmt.Exec(b.domain); err != nil {
 				log.Printf("touch %s: %v", b.domain, err)
 			}
@@ -2814,8 +2871,23 @@ func crawlOne(t target) result {
 		// T1: sitemap-driven discovery. Sitemaps list URLs the homepage crawl
 		// would never find; discovered domains join the normal emit path.
 		sitemapDiscover(domain, t.ip, ri, info)
+		// HE-10: a 304 skipped the body download — credit the stored content_length
+		// (from the last full fetch) as bytes saved.
+		if n := savedBytes(t, info); n > 0 && mBytesSaved != nil {
+			mBytesSaved.Add(n)
+		}
 		return result{domain: domain, info: info}
 	}
+}
+
+// savedBytes reports how many body bytes a 304 Not Modified saved us: the stored
+// content_length from the target's last full fetch. Zero for anything that isn't a
+// 304 with a known prior body size. (HE-10)
+func savedBytes(t target, info *WebsiteInfo) int64 {
+	if info == nil || !info.NotModified || t.contentLen <= 0 {
+		return 0
+	}
+	return t.contentLen
 }
 
 // errRobotsDisallowed is returned by crawlOneURL when robots.txt disallows the crawl.
@@ -3150,6 +3222,13 @@ func buildWARCResponse(resp *http.Response, body []byte) []byte {
 func fetchWebsiteInfo(ctx context.Context, domain, ip, etag, lastModified string, rules *robotstxt.Rules) (info *WebsiteInfo, err error) {
 	var redirects int
 	var offsite string // host of an off-site redirect we stopped at
+	// HE-10: conditional-fetch observability — every homepage fetch attempt is counted, and
+	// attempts carrying validators (If-None-Match and/or If-Modified-Since) are counted separately
+	// so conditional coverage = conditional_requests / fetch_attempts is measurable.
+	minc(mFetchAttempts)
+	if etag != "" || lastModified != "" {
+		minc(mConditionalReqs)
+	}
 	defer func() {
 		// The off-site redirect target is queued for discovery (same folding as outbound links) so it gets crawled
 		// separately, with its own robots.txt and pacing.
@@ -3227,9 +3306,13 @@ func fetchWebsiteInfo(ctx context.Context, domain, ip, etag, lastModified string
 		ServerHeader:  clip(resp.Header.Get("Server"), maxShortLen),
 	}
 	// 304 Not Modified: our stored copy is still current. No body to read; flag it and return —
-	// the flush path only bumps crawled_at, keeping the row intact.
+	// the flush path only bumps crawled_at, keeping the row intact. HE-10: a 304 may still carry
+	// rotated validators (RFC 7232 §4.1) — capture them so the flush touch can refresh the stored
+	// copy instead of letting it go stale.
 	if resp.StatusCode == http.StatusNotModified {
 		info.NotModified = true
+		info.ETag = dropIfLong(resp.Header.Get("ETag"), 256)
+		info.LastModified = dropIfLong(resp.Header.Get("Last-Modified"), 64)
 		return info, nil
 	}
 	// Persist conditional-GET validators only for a genuine 200 — never for error or challenge

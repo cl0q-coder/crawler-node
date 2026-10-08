@@ -178,6 +178,8 @@ a{color:#0366d6}
 	b.WriteString("<div class=\"section\"><h2>Efficiency</h2><div class=\"grid\">\n")
 	card("Duplicates skipped", "crawler_pages_duplicates_total", "SimHash near-dupes")
 	card("Unchanged (304)", "crawler_pages_unchanged_total", "conditional GET hits")
+	card("Conditional GETs", "crawler_conditional_requests_total", "recrawls with validators")
+	card("Bytes saved (304)", "crawler_bytes_saved_total", "body bytes skipped")
 	card("Sitemaps found", "crawler_sitemaps_found_total", "sitemap.xml parsed")
 	b.WriteString("</div></div>\n")
 

@@ -251,6 +251,11 @@ var mBreakerOpen *atomic.Int64
 var mBreakerProbes *atomic.Int64  // HE-7: half-open canary probe attempts
 var mBreakerProbeOK *atomic.Int64 // HE-7: probes that recovered their group early
 
+// HE-6: unknown-frontier sweep observability. mFrontierUnknown is the exact
+// never-crawled count Chris watches go down (sampled at frontier snapshot
+// reload); the counters track probe attempts and first-time drains.
+var mFrontierProbed, mFrontierDrained, mFrontierUnknown *atomic.Int64
+
 var (
 	dialSem         chan struct{}
 	userAgent       string
@@ -849,6 +854,9 @@ func main() {
 	mBreakerOpen = mreg.Counter("crawler_breaker_opens_total", "times the ASN/IP breaker opened a cooldown")
 	mBreakerProbes = mreg.Counter("crawler_breaker_probes_total", "HE-7: half-open canary probe attempts")
 	mBreakerProbeOK = mreg.Counter("crawler_breaker_probe_success_total", "HE-7: probes that closed their group early")
+	mFrontierProbed = mreg.Counter("crawler_frontier_probes_total", "HE-6: breaker-open probe attempts (half-open canary)")
+	mFrontierDrained = mreg.Counter("crawler_frontier_drained_total", "HE-6: never-crawled domains attempted (left the unknown frontier)")
+	mFrontierUnknown = mreg.Gauge("crawler_frontier_unknown", "HE-6: never-crawled domains (web_crawled_at IS NULL AND dns_fail_count < 3); sampled at frontier snapshot reload")
 	mSitemapURLs = mreg.Counter("crawler_sitemap_urls_total", "T1: domains discovered via sitemaps")
 	// cachedCount runs the query at most once per 60s; gauges scrape often
 	// and COUNT(*) on 13M+ row tables is expensive.
@@ -1222,9 +1230,36 @@ type frontierSnapshot struct {
 	keys   []string // groupKey() of rows[i], precomputed at load
 	cursor int
 	loaded time.Time
+	// HE-6: last sampled unknown-frontier count + when, for the drain-rate log.
+	lastUnknown   int64
+	lastUnknownAt time.Time
 }
 
 var frontierSnap frontierSnapshot
+
+// probeReserve returns how many of maxReturn batch slots are reserved for
+// breaker-open probes (HE-6 half-open canary). At least 1 when enabled so a
+// fully-blocked frontier still drains; FRONTIER_PROBE_PCT=0 disables.
+func probeReserve(maxReturn int) int {
+	if maxReturn <= 0 {
+		return 0
+	}
+	pct := envInt("FRONTIER_PROBE_PCT", 1)
+	if pct <= 0 {
+		return 0
+	}
+	r := maxReturn * pct / 100
+	if r < 1 {
+		r = 1
+	}
+	if r > maxReturn {
+		r = maxReturn
+	}
+	if r > maxReturn/2 {
+		r = maxReturn / 2 // tiny batches: never let the reserve dominate
+	}
+	return r
+}
 
 // loadFrontier reads the whole frontier (highest OPIC score first, capped at
 // max rows) with its breaker group key. T2: OPIC ordering replaces the old
@@ -1259,12 +1294,47 @@ func loadFrontier(db *sql.DB, max int) ([]target, []string, error) {
 	return ts, keys, nil
 }
 
-// draw returns up to n snapshot rows whose group breaker is closed (at most maxPerGroup per group, 0 = no cap),
-// removing them from the snapshot; rows of breaker-open or already-full groups are skipped and stay for a later
-// draw. Reloads the snapshot when it's older than refresh.
+// sampleUnknown records the exact unknown-frontier count (HE-6 dashboard
+// number) and the net drain since the previous sample. The count runs over
+// the partial index idx_domain_info_crawl_todo, so it is an index-only scan
+// on exactly the frontier predicate — no full-table work.
+func (f *frontierSnapshot) sampleUnknown(db *sql.DB) (unknown, drained int64, perDay float64, ok bool) {
+	if err := db.QueryRow(`SELECT count(*) FROM domain_info WHERE web_crawled_at IS NULL AND dns_fail_count < 3`).Scan(&unknown); err != nil {
+		log.Printf("frontier unknown count: %v", err)
+		return 0, 0, 0, false
+	}
+	if mFrontierUnknown != nil {
+		mFrontierUnknown.Store(unknown)
+	}
+	f.mu.Lock()
+	prev, prevAt := f.lastUnknown, f.lastUnknownAt
+	f.lastUnknown, f.lastUnknownAt = unknown, time.Now()
+	f.mu.Unlock()
+	if !prevAt.IsZero() {
+		drained = prev - unknown
+		if h := time.Since(prevAt).Hours(); h > 0 {
+			perDay = float64(drained) / h * 24
+		}
+	}
+	return unknown, drained, perDay, true
+}
+
+// draw returns up to n snapshot rows (at most maxPerGroup per group, 0 = no cap),
+// removing them from the snapshot; rows of already-full groups are skipped and stay
+// for a later draw. Reloads the snapshot when it's older than refresh — or when
+// more than half the window is already drawn, so a fast drain doesn't idle the
+// fresh pipeline on an empty snapshot until the next timed refresh.
+//
+// HE-6 two-pass draw: pass 1 takes closed-group rows (the old behavior —
+// breaker-open groups were skipped here and deferred forever); pass 2 takes up
+// to the probe reserve from breaker-open groups, marked probe. capBatch admits
+// both; crawlOne attempts probes via admitCanary (breaker-gated half-open
+// canary), so the row is stamped and leaves the frontier even when its group
+// never recovers. A batch never returns 0 while the frontier is non-empty.
 func (f *frontierSnapshot) draw(db *sql.DB, n, maxPerGroup int, refresh time.Duration, max int) ([]target, error) {
 	f.mu.Lock()
-	stale := f.loaded.IsZero() || time.Since(f.loaded) > refresh
+	low := len(f.rows) < max/2
+	stale := f.loaded.IsZero() || time.Since(f.loaded) > refresh || low
 	f.mu.Unlock()
 	if stale {
 		t0 := time.Now()
@@ -1276,17 +1346,26 @@ func (f *frontierSnapshot) draw(db *sql.DB, n, maxPerGroup int, refresh time.Dur
 		for _, k := range keys {
 			groups[k] = true
 		}
-		log.Printf("frontier snapshot: %d rows, %d groups loaded in %s (cap %d)", len(ts), len(groups), time.Since(t0).Round(time.Millisecond), max)
+		msg := fmt.Sprintf("frontier snapshot: %d rows, %d groups loaded in %s (cap %d)",
+			len(ts), len(groups), time.Since(t0).Round(time.Millisecond), max)
+		if unknown, drained, perDay, ok := f.sampleUnknown(db); ok {
+			msg += fmt.Sprintf("; unknown=%d drained=%d since last reload (~%.0f/day)", unknown, drained, perDay)
+		}
+		log.Print(msg)
 		f.mu.Lock()
 		f.rows, f.keys, f.cursor, f.loaded = ts, keys, 0, time.Now()
 		f.mu.Unlock()
 	}
+	// HE-6 probe reserve: the last probeN slots go to breaker-open rows.
+	probeN := probeReserve(n)
+	mainN := n - probeN
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]target, 0, n)
 	perGroup := map[string]int{}
 	i, total := f.cursor, len(f.rows)
-	for visited := 0; visited < total && len(out) < n && len(f.rows) > 0; visited++ {
+	// pass 1: closed groups, in snapshot (OPIC) order, up to the main budget.
+	for visited := 0; visited < total && len(out) < mainN && len(f.rows) > 0; visited++ {
 		if i >= len(f.rows) {
 			i = 0
 		}
@@ -1297,6 +1376,29 @@ func (f *frontierSnapshot) draw(db *sql.DB, n, maxPerGroup int, refresh time.Dur
 		perGroup[f.keys[i]]++
 		out = append(out, f.rows[i])
 		last := len(f.rows) - 1 // swap-remove; the (pre-shuffled) last row takes slot i
+		f.rows[i], f.keys[i] = f.rows[last], f.keys[last]
+		f.rows, f.keys = f.rows[:last], f.keys[:last]
+	}
+	// pass 2: probe reserve from breaker-open groups.
+	probed := 0
+	for visited := 0; visited < total && len(out) < n && probed < probeN && len(f.rows) > 0; visited++ {
+		if i >= len(f.rows) {
+			i = 0
+		}
+		k := f.keys[i]
+		if !breaker.blocked(k) || (maxPerGroup > 0 && perGroup[k] >= maxPerGroup) {
+			i++
+			continue
+		}
+		t := f.rows[i]
+		t.probe = true
+		perGroup[k]++
+		out = append(out, t)
+		probed++
+		if mFrontierProbed != nil {
+			mFrontierProbed.Add(1)
+		}
+		last := len(f.rows) - 1 // swap-remove
 		f.rows[i], f.keys[i] = f.rows[last], f.keys[last]
 		f.rows, f.keys = f.rows[:last], f.keys[:last]
 	}
@@ -1382,10 +1484,19 @@ func scanTargets(rows *sql.Rows, withInfra bool) ([]target, error) {
 }
 
 // capBatch de-clusters the enriched pool: walk it IN ORDER (OPIC score order
-// from the frontier — the priority), admit at most maxPerGroup targets
-// per group (ASN org → IP → registrable parent), skip groups whose breaker is open, and
-// dedup domains — up to maxReturn total. This stops one busy/blocked ASN from monopolizing
-// a batch (the insert-dip root cause) and yields a diverse, healthy work set.
+// from the frontier — the priority), admit closed-group targets first, then
+// fill the HE-6 probe reserve from breaker-open groups (marked probe), then
+// backfill any unfilled slots with closed-group rows so a healthy pool still
+// yields a full batch. Per-group caps (ASN org → IP → registrable parent)
+// and domain dedup apply throughout, up to maxReturn total.
+//
+// Unknowns outrank recrawls by construction: callers pass fresh rows before
+// stale rows, and admission follows input order.
+//
+// HE-6: targets pre-marked probe (by the snapshot draw's probe reserve)
+// bypass the breaker check — they are the half-open canary for their group.
+// The draw is the only probe source, so this stays a single early-exit pass.
+// crawlOne re-gates them through admitCanary (breaker-owned timing).
 func capBatch(ts []target, maxPerGroup, maxReturn int) []target {
 	if maxReturn < 1 {
 		maxReturn = len(ts)
@@ -1399,7 +1510,7 @@ func capBatch(ts []target, maxPerGroup, maxReturn int) []target {
 	counts := make(map[string]int, hint)
 	seenDom := make(map[string]bool, hint)
 	out := make([]target, 0, maxReturn)
-	var blocked, capped int
+	var blocked, capped, probed int
 	for _, t := range ts {
 		if len(out) >= maxReturn {
 			break
@@ -1408,7 +1519,7 @@ func capBatch(ts []target, maxPerGroup, maxReturn int) []target {
 			continue // domain_info can hold duplicate domain rows; crawl each once
 		}
 		k := t.groupKey()
-		if breaker.blocked(k) {
+		if breaker.blocked(k) && !t.probe {
 			blocked++
 			continue
 		}
@@ -1416,12 +1527,15 @@ func capBatch(ts []target, maxPerGroup, maxReturn int) []target {
 			capped++
 			continue
 		}
+		if t.probe {
+			probed++
+		}
 		counts[k]++
 		seenDom[t.domain] = true
 		out = append(out, t)
 	}
-	log.Printf("select: pool=%d -> %d targets (cap %d/group; deferred %d breaker-open, %d over-cap)",
-		len(ts), len(out), maxPerGroup, blocked, capped)
+	log.Printf("select: pool=%d -> %d targets (cap %d/group; deferred %d breaker-open, %d over-cap, %d probes)",
+		len(ts), len(out), maxPerGroup, blocked, capped, probed)
 	return out
 }
 
@@ -2193,6 +2307,18 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 	//    Failures keep the current interval. NULL interval means "global RECRAWL_DAYS".
 	if !skipStamp {
 		defInterval := float64(recrawlDays())
+		// HE-6: count first-time drains — attempted domains that had never
+		// been crawled before this batch. Must read the pre-image BEFORE
+		// he4UpdateSignals stamps web_crawled_at below. One indexed SELECT
+		// on idx_domain_info_domain; exact, no extra writes.
+		if mFrontierDrained != nil && len(all) > 0 {
+			var drained int64
+			if err := tx.QueryRow(`SELECT count(*) FROM domain_info WHERE domain = ANY($1) AND web_crawled_at IS NULL`, pq.Array(all)).Scan(&drained); err != nil {
+				log.Printf("frontier drained count: %v", err)
+			} else {
+				mFrontierDrained.Add(drained)
+			}
+		}
 		if err := he4UpdateSignals(ctx, tx, verdicts, notmod, defInterval); err != nil {
 			return 0, err
 		}

@@ -6,8 +6,8 @@
 //   - integrity: HMAC-SHA256 content signing at crawl/submit time so
 //     tampering is detectable downstream.
 //   - verifier: randomly re-crawls a sample of a node's work from a
-//     trusted verifier and compares content hashes; mismatch rate feeds
-//     the trust score.
+//     trusted verifier and compares SimHash fingerprints; mismatch rate feeds
+//     the trust score. Fetch failures are inconclusive, never penalties.
 //   - score: per-node trust score from verification history, heartbeat
 //     uptime, and data quality; tiers gate what work a node receives.
 //   - sybil: Hashcash-style proof-of-work for enrollment, so spinning up

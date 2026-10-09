@@ -10,8 +10,8 @@ always verify** — and make lying expensive.
                     ┌─────────────────────┐
   node crawls page  │   internal/trust    │
         │           │                     │
-        ▼           │  integrity.SignResult│  HMAC-SHA256(nodeID, URL, hash, ts)
-  signed submission ├─▶  verifier pipeline│  sample → trusted re-fetch → compare
+        ▼           │  integrity.SignResult│  HMAC-SHA256(nodeID, URL, hash, simhash, ts)
+  signed submission ├─▶  verifier pipeline│  sample → trusted re-fetch → fuzzy compare
         │           │  TrustScorer         │  EWMA(verif .6, uptime .25, quality .15)
         ▼           │  sybil.PoW          │  Hashcash at enrollment
   ingest / index    └─────────────────────┘
@@ -21,28 +21,53 @@ always verify** — and make lying expensive.
 
 The trusted verifier samples a fraction (`SampleRate`, server-configured)
 of each node's submissions and re-fetches the URL from infrastructure the
-node cannot influence. The SHA-256 of the trusted fetch is compared to the
-node's claimed hash. Three checks, in order:
+node cannot influence. The SimHash fingerprint of the trusted fetch is
+compared to the node's claimed fingerprint (fuzzy, not byte-exact — see
+below). Three checks, in order:
 
 1. **Staleness** — the submission's `claimed_at` must be within `MaxAge` of
    now. The integrity signature binds a timestamp, so this is also the
    replay guard.
-2. **Signature** — `VerifyResult` with the node's secret (its
-   `refresh_secret`, which the server already holds from enrollment). A
-   failed signature means the submission was tampered with in transit or
-   misattributed to another node.
-3. **Content match** — trusted re-fetch hash vs claimed hash. This is the
-   check a signature alone cannot provide: a dishonest node can sign its
-   own lie perfectly.
+2. **Signature** — `VerifyResult` with the node's SIGNING key, provisioned
+   via `KeyFor` (see §4). A failed signature means the submission was
+   tampered with in transit or misattributed to another node. When
+   `KeyFor` returns nil (legacy node, no key provisioned) the check is
+   skipped — `SigOK` stays false and the re-fetch is the only honesty
+   check.
+3. **Content match (fuzzy)** — trusted re-fetch vs claimed content compared
+   by SimHash near-duplicate (Hamming distance ≤ `VerifySimHashThreshold`,
+   12), not byte-exact SHA-256. The live web is dynamic (session tokens,
+   ads, personalization, CDN/compression variance, whitespace) — byte-exact
+   comparison would rack up mismatches against HONEST nodes and score them
+   down unfairly. Measured: honest drift on a short dynamic page = 5 bits;
+   wholesale content replacement = 25 bits; 12 separates both with margin.
 
-Every outcome is recorded in the scorer. A fetch failure is recorded as a
-non-match (fail-closed): a node whose pages systematically "can't be
-re-fetched" looks exactly like a node hiding poisoned content.
+A trusted re-fetch FAILURE is **inconclusive**, not a miss: it is usually
+verifier-side (target down for us, rate-limited, geo-blocked, transient)
+and is attacker-exploitable (pick URLs that block the verifier's egress
+IP), so it must not penalize the node. Inconclusive outcomes record
+NOTHING in the scorer — neither match nor miss.
+
+**Sampling is tier-blind:** `MaybeVerify` samples full-tier nodes at the
+same `SampleRate` as everyone else. A node cannot earn trust and then
+defect unobserved — see "Earn-trust-then-defect" below.
 
 **Sampling rate guidance:** 1–5% per node is enough to catch systematic
 dishonesty quickly (probability of missing N consecutive lies is
 (1−p)^N; at p=0.02, 200 lies → 98% detection) while keeping verifier
 bandwidth bounded.
+
+#### Earn-trust-then-defect (design note)
+
+A node behaves for 25+ verifications to reach `full`, then poisons. The
+sampling design catches this because full-tier nodes stay sampled: with
+EWMA α=0.15, a full node (verifScore≈1.0, uptime=quality=1.0) falls below
+the 0.80 full bar after **3 consecutive sampled misses** (measured in
+`TestEarnTrustThenDefect`). Un-sampled poison between samples is bounded:
+at sample rate p, the expected number of un-sampled submissions per
+detected miss is (1−p)/p (at p=0.02, ~49). This is the residual risk of
+any sampling verifier — the J2 adversarial suite carries this as an
+attack case.
 
 ### 2. Trust scoring (implemented: `internal/trust/score.go`)
 
@@ -99,21 +124,36 @@ operator tier ever exists.
 
 ### 4. Data integrity (implemented: `internal/trust/integrity.go`)
 
-`SignResult(secret, nodeID, url, contentHash, ts)` → HMAC-SHA256 over a
-canonical message with 0x00-separated fields (no concatenation ambiguity).
-The secret is the node's `refresh_secret`, already shared at enrollment.
-Downstream systems (ingest, index builders, anyone holding the secret)
-detect any tampering with node identity, URL, content, or timestamp.
+`SignResult(secret, nodeID, url, contentHash, simHash, ts)` → HMAC-SHA256
+over a canonical message with 0x00-separated fields (no concatenation
+ambiguity). The secret is the node's **signing key** —
+`DeriveSigningKey(refresh_secret)` = SHA-256("cl0q-trust-sign/v1" ‖ 0x00 ‖
+refresh_secret) — NOT the raw refresh_secret.
+
+**Key contract (option b, decided 2026-10-09):** the node derives the
+signing key locally from the refresh_secret it received at enrollment.
+The server NEVER needs the plaintext refresh_secret for signatures: at
+enrollment it computes `DeriveSigningKey(refresh_secret)`, stores THAT
+(a signing_key column, or alongside the existing refresh_secret_HASH),
+and hands it to the verifier as `KeyFor(nodeID)`. Downstream systems
+(ingest, index builders, anyone holding the key) detect any tampering
+with node identity, URL, content, simhash, or timestamp. If `KeyFor`
+returns nil, the signature check is skipped — that must never be mistaken
+for enforced signatures.
 
 ## What the server still needs (for Claude)
 
 1. Issue `pow_challenge {seed, difficulty}` in the enroll response;
    verify `POST /api/nodes/enroll/confirm {node_id, pow_nonce}` with
    `VerifySolution` before activating the node.
-2. Run the verifier worker loop: sample submissions → trusted re-fetch →
+2. **Provision the signing key at enrollment:** compute
+   `trust.DeriveSigningKey(refresh_secret)` server-side, store it, and
+   supply it as the verifier's `KeyFor(nodeID)`. The server never needs
+   the plaintext refresh_secret for signatures — only the derived key.
+3. Run the verifier worker loop: sample submissions → trusted re-fetch →
    `Verifier.MaybeVerify` → feed `TrustScorer` → enforce `RouteWork` tiers
    in the work-assignment path.
-3. Admin quarantine view + re-promotion flow (overlaps HE-1's admin gap).
+4. Admin quarantine view + re-promotion flow (overlaps HE-1's admin gap).
 
 ## Demonstration
 
@@ -141,7 +181,8 @@ signals, operator quarantine hold, PoW solve/verify round-trips.
   re-promotion flow (`ClearQuarantineHold` + a verifier sweep).
 - **Sybil wave:** raise enroll PoW difficulty; watch the enroll confirm
   rate — legit operators solve in seconds, bot farms stall.
-- **Key rotation:** the signing secret IS the `refresh_secret`; rotation
-  re-keys signatures automatically. Old-signatured submissions fail
-  verification during the overlap — keep `MaxAge` wider than the rotation
-  window.
+- **Key rotation:** the signing key derives from the `refresh_secret`
+  (`DeriveSigningKey`), so rotation re-keys signatures automatically. Old
+  submissions signed under the previous key fail verification during the
+  overlap — keep `MaxAge` wider than the rotation window, and provision
+  the new derived key server-side at rotation time.

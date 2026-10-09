@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"cl0q/botid"
+	"cl0q/internal/trust"
 )
 
 type enrollRequest struct {
@@ -37,6 +38,10 @@ type enrollResponse struct {
 	RefreshSecret string `json:"refresh_secret"`
 	IngestURL     string `json:"ingest_url"`
 	Quarantined   bool   `json:"quarantined"`
+	// PowChallenge, when present, is a G-12 proof-of-work Sybil gate: the
+	// client must solve it and confirm before credentials are trusted.
+	// Absent = server doesn't require PoW; enrollment proceeds unchanged.
+	PowChallenge *trust.Challenge `json:"pow_challenge,omitempty"`
 }
 
 // nodeCredentials is what lives in the credentials file (0600). The
@@ -201,6 +206,14 @@ func doEnroll(ingestURL, contact, out string) error {
 	if _, err := botid.UserAgent(er.NodeID); err != nil {
 		return fmt.Errorf("server returned invalid node_id: %w", err)
 	}
+	// G-12 Sybil gate: if the server issued a proof-of-work challenge, solve
+	// it and confirm before the credentials are usable. Backward compatible:
+	// no challenge in the response = no PoW required.
+	if er.PowChallenge != nil {
+		if err := confirmPoW(ingestURL, er.NodeID, *er.PowChallenge); err != nil {
+			return fmt.Errorf("proof-of-work confirm: %w", err)
+		}
+	}
 	if err := writeCredentials(out, nodeCredentials{
 		NodeID:        er.NodeID,
 		Token:         er.Token,
@@ -215,5 +228,41 @@ func doEnroll(ingestURL, contact, out string) error {
 	}
 	fmt.Printf("enrolled as node %s — %s\ncredentials stored at %s (mode 0600)\nnext: set CL0Q_NODE_ID=%s (or it is read from the credentials file) and run preflight\n",
 		er.NodeID, quarantine, out, er.NodeID)
+	return nil
+}
+
+// powConfirmRequest is sent to POST /api/nodes/enroll/confirm after solving
+// the server's challenge. The server re-verifies with trust.VerifySolution
+// (one hash) and only then activates the node.
+type powConfirmRequest struct {
+	NodeID   string `json:"node_id"`
+	PowNonce uint64 `json:"pow_nonce"`
+}
+
+func confirmPoW(ingestURL, nodeID string, ch trust.Challenge) error {
+	fmt.Printf("server requires proof-of-work (difficulty %d bits) — solving...\n", ch.Difficulty)
+	nonce, err := trust.SolveChallenge(ch, nodeID)
+	if err != nil {
+		return err
+	}
+	reqBody, _ := json.Marshal(powConfirmRequest{NodeID: nodeID, PowNonce: nonce})
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ingestURL+"/api/nodes/enroll/confirm", bytes.NewReader(reqBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "cl0q-node-enroll/1.0")
+	resp, err := enrollClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST %s/api/nodes/enroll/confirm: %w", ingestURL, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 65536))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("server returned HTTP %d: %s", resp.StatusCode, bytes.TrimSpace(body))
+	}
+	fmt.Println("proof-of-work accepted — node activated")
 	return nil
 }

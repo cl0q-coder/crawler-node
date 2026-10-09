@@ -28,6 +28,36 @@ const (
 	maxProbeInterval = 5 * time.Minute
 )
 
+// robotsTTL is how long a fetched robots.txt verdict is trusted without
+// refetching (RFC 9309 suggests up to 24h). It bounds refetch rate per node;
+// the shared fleet cache (post-HE-1) will back this same layer.
+const robotsTTL = 24 * time.Hour
+
+// pruneRobotsCache drops expired robots.txt verdicts so the cache stays
+// bounded to hosts crawled within the TTL. This replaces the old per-batch
+// wipe/clear: cross-batch reuse is the point now, and TTL + prune keep the
+// 2026-07-13 leak class fixed.
+func pruneRobotsCache() {
+	now := time.Now()
+	robotsCache.Range(func(k, v any) bool {
+		if ri, ok := v.(robotsInfo); ok && now.Sub(ri.fetchedAt) >= robotsTTL {
+			robotsCache.Delete(k)
+		}
+		return true
+	})
+}
+
+// cachedRobots reports the cached verdict for domain and whether it is still
+// within its TTL. Factored out of robotsFor for tests.
+func cachedRobots(domain string) (robotsInfo, bool) {
+	if v, ok := robotsCache.Load(domain); ok {
+		if ri, ok := v.(robotsInfo); ok && time.Since(ri.fetchedAt) < robotsTTL {
+			return ri, true
+		}
+	}
+	return robotsInfo{}, false
+}
+
 // tryProbe admits a half-open canary fetch for a breaker-open group. At most
 // one probe is in flight per group and probes are spaced at least a quarter
 // of the remaining cooldown apart, so a canary never becomes a hammer.

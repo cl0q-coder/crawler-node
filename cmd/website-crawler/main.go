@@ -1554,12 +1554,12 @@ func crawlBatch(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, targets
 	fq := newFrontQueue(targets, tunables.HostDelay())
 	pruneGates(&hostGates, gateIdle)
 	pruneGates(&ipGates, gateIdle)
-	// robotsCache is keyed per DOMAIN, but every domain is crawled ~once (web_crawled_at),
-	// so it never gets a cache hit across batches — it just grew unbounded (one entry per
-	// domain, forever) and was the crawler's main memory LEAK (631MB RSS over ~6d uptime →
-	// GC thrash + box swap → throughput collapse, 2026-07-13). Reset it per batch; it only
-	// needs to dedup within a batch, which bounds it to this batch's domains.
-	robotsCache = sync.Map{}
+	// HE-7: robotsCache is no longer wiped per batch. Entries carry a 24h TTL
+	// (robotsTTL) and expired ones are pruned here, so a host's robots.txt is
+	// fetched at most once per TTL instead of once per batch cycle — while the
+	// prune keeps the 2026-07-13 leak class fixed (the map stays bounded to
+	// hosts seen within the TTL).
+	pruneRobotsCache()
 	// Prune sitemapChecked per batch too: entries older than the recheck
 	// interval are dead weight, and without pruning the map grows one entry
 	// per crawled domain forever.
@@ -1728,7 +1728,7 @@ func crawlContinuous(ctx context.Context, db *sql.DB, spool *dbresil.Spooler, wo
 			// so a gap still in effect (up to the 30 s Crawl-delay cap) is never cut short.
 			pruneGates(&hostGates, gateIdle)
 			pruneGates(&ipGates, gateIdle)
-			robotsCache.Clear()
+			pruneRobotsCache() // HE-7: TTL expiry, not a wipe — cross-batch reuse is the point now
 			// sitemapChecked never shrinks in PIPELINE mode (no batches), so
 			// prune it on the timer too; entries older than the recheck
 			// interval can never suppress a fetch again.
@@ -3392,11 +3392,12 @@ func textOf(n *html.Node) string {
 var errThrottled = errors.New("throttled: robots returned 429/503")
 
 type robotsInfo struct {
-	allowed  bool             // the homepage "/" may be fetched
-	delay    time.Duration    // Crawl-delay, capped at robotstxt.MaxCrawlDelay
-	rules    *robotstxt.Rules // path rules, checked again for every redirect hop
-	sitemaps []string         // T1: Sitemap: directive URLs from robots.txt (may be empty)
-	blockErr error            // the server dropped/reset/timed out the robots request → it's refusing us (not cached)
+	allowed   bool             // the homepage "/" may be fetched
+	delay     time.Duration    // Crawl-delay, capped at robotstxt.MaxCrawlDelay
+	rules     *robotstxt.Rules // path rules, checked again for every redirect hop
+	sitemaps  []string         // T1: Sitemap: directive URLs from robots.txt (may be empty)
+	blockErr  error            // the server dropped/reset/timed out the robots request → it's refusing us (not cached)
+	fetchedAt time.Time        // HE-7: when this verdict was fetched; entries older than robotsTTL are refetched
 }
 
 // robotsCall is one robots.txt fetch in progress; callers asking for the same host meanwhile wait for its result.
@@ -3407,11 +3408,12 @@ type robotsCall struct {
 
 var robotsInflight sync.Map // host -> *robotsCall
 
-// robotsFor returns the robots.txt verdict for host domain, caching it per host. Concurrent callers for the same
+// robotsFor returns the robots.txt verdict for host domain, caching it per host
+// for robotsTTL (HE-7; was: wiped every batch). Concurrent callers for the same
 // host share one fetch, so robots.txt is never requested twice at once.
 func robotsFor(domain, ip string) robotsInfo {
-	if v, ok := robotsCache.Load(domain); ok {
-		return v.(robotsInfo)
+	if ri, ok := cachedRobots(domain); ok {
+		return ri
 	}
 	c := &robotsCall{done: make(chan struct{})}
 	if v, loaded := robotsInflight.LoadOrStore(domain, c); loaded {
@@ -3422,6 +3424,7 @@ func robotsFor(domain, ip string) robotsInfo {
 	defer func() { robotsInflight.Delete(domain); close(c.done) }()
 	ipThrottle(ip) // the robots.txt GET is a request to that server like any other
 	c.ri = fetchRobots(domain, ip)
+	c.ri.fetchedAt = time.Now()
 	if c.ri.blockErr == nil {
 		robotsCache.Store(domain, c.ri)
 	}

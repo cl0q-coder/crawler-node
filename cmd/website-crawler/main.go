@@ -248,6 +248,8 @@ var warcFile *os.File
 var warcMu sync.Mutex // IG4: serializes WARC writes
 
 var mBreakerOpen *atomic.Int64
+var mBreakerProbes *atomic.Int64  // HE-7: half-open canary probe attempts
+var mBreakerProbeOK *atomic.Int64 // HE-7: probes that recovered their group early
 
 var (
 	dialSem         chan struct{}
@@ -455,6 +457,11 @@ type target struct {
 	// If-Modified-Since so an unchanged page returns 304 and skips the download+parse.
 	etag         string
 	lastModified string
+	// probe marks a target selected by the frontier reserve as the half-open
+	// canary for its breaker-open group (HE-6/HE-7 reconciled). crawlOne
+	// attempts it despite the open breaker via admitCanary; the outcome
+	// routes through the breaker's probe-aware fail()/success().
+	probe bool
 }
 
 // groupKey is the backoff/cap bucket for a target: prefer the ASN org (so a whole
@@ -475,11 +482,13 @@ func (t target) groupKey() string {
 
 // breakState is the per-group rolling failure counter + open-window state.
 type breakState struct {
-	mu        sync.Mutex
-	fails     int
-	winStart  time.Time
-	openUntil time.Time
-	level     int // consecutive trips → exponential cooldown
+	mu            sync.Mutex
+	fails         int
+	winStart      time.Time
+	openUntil     time.Time
+	level         int       // consecutive trips → exponential cooldown
+	probeInFlight bool      // HE-7: a half-open canary is outstanding for this group
+	lastProbe     time.Time // HE-7: when the last canary was admitted
 }
 
 type asnBreaker struct {
@@ -510,6 +519,9 @@ func (b *asnBreaker) blocked(key string) bool {
 
 // fail records a timeout/throttle failure for a group; trips the breaker when the
 // threshold is reached within the window, opening it for an exponential cooldown.
+// HE-6/HE-7 reconciled: while a half-open probe is in flight, a failure means
+// the canary found the group still sick — the cooldown is left UNCHANGED (no
+// ratchet, no re-trip). Probes must not escalate a sick group forever.
 func (b *asnBreaker) fail(key string) {
 	if !b.enabled || key == "" {
 		return
@@ -520,6 +532,10 @@ func (b *asnBreaker) fail(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if now.Before(s.openUntil) {
+		if s.probeInFlight {
+			s.probeInFlight = false
+			log.Printf("asn-backoff: probe failed for %s, cooldown unchanged", key)
+		}
 		return // already open; keep the current cooldown
 	}
 	if s.winStart.IsZero() || now.Sub(s.winStart) > b.window {
@@ -527,26 +543,14 @@ func (b *asnBreaker) fail(key string) {
 	}
 	s.fails++
 	if s.fails >= b.threshold {
-		s.level++
-		cd := b.base << (s.level - 1)
-		if cd > b.cap || cd <= 0 { // cooldown pinned at the cap (or the shift overflowed)
-			cd = b.cap
-			// Do NOT ratchet the level once the cooldown is already at the cap. Otherwise it
-			// climbs unbounded (seen live at level 21) while every level at/above this one yields
-			// the same cap cooldown, and success()'s 1-per-clean-cycle decay can never unwind it
-			// before the group re-trips → the ASN stays locked out effectively forever. Clamping
-			// the level here lets a recovered group relax in a bounded number of clean cycles.
-			s.level--
-		}
-		s.openUntil = now.Add(cd)
-		s.fails, s.winStart = 0, time.Time{}
-		log.Printf("asn-backoff: OPEN %s for %s (level %d)", key, cd, s.level)
-		minc(mBreakerOpen)
+		b.tripLocked(key, s, now, "threshold")
 	}
 }
 
 // success records that the group responded; clears the rolling failure count and, after
 // a clean result past any cooldown, relaxes the escalation level so it can recover.
+// HE-7: when the clean result came from a half-open probe, the group has proven
+// recovery — close the breaker immediately instead of waiting out the cooldown.
 func (b *asnBreaker) success(key string) {
 	if !b.enabled || key == "" {
 		return
@@ -559,6 +563,16 @@ func (b *asnBreaker) success(key string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.fails, s.winStart = 0, time.Time{}
+	if s.probeInFlight {
+		s.probeInFlight = false
+		s.openUntil = time.Time{}
+		if s.level > 0 {
+			s.level--
+		}
+		log.Printf("asn-backoff: CLOSED %s via probe (level %d)", key, s.level)
+		minc(mBreakerProbeOK)
+		return
+	}
 	if time.Now().After(s.openUntil) && s.level > 0 {
 		s.level-- // decay escalation after a clean recovery so cooldowns don't ratchet forever
 	}
@@ -833,6 +847,8 @@ func main() {
 	mCrawledDeferred = mreg.Counter("crawler_pages_deferred_total", "pages deferred by ASN/IP backoff")
 	mCrawledBlocked = mreg.Counter("crawler_pages_blocked_total", "pages blocked by blacklist")
 	mBreakerOpen = mreg.Counter("crawler_breaker_opens_total", "times the ASN/IP breaker opened a cooldown")
+	mBreakerProbes = mreg.Counter("crawler_breaker_probes_total", "HE-7: half-open canary probe attempts")
+	mBreakerProbeOK = mreg.Counter("crawler_breaker_probe_success_total", "HE-7: probes that closed their group early")
 	mSitemapURLs = mreg.Counter("crawler_sitemap_urls_total", "T1: domains discovered via sitemaps")
 	// cachedCount runs the query at most once per 60s; gauges scrape often
 	// and COUNT(*) on 13M+ row tables is expensive.
@@ -2482,7 +2498,11 @@ func safeCrawl(t target) (r result) {
 func crawlOne(t target) result {
 	domain := t.domain
 	key := t.groupKey()
-	if breaker.blocked(key) {
+	// HE-6/HE-7 reconciled half-open canary: a breaker-open group admits ONLY
+	// a frontier-reserve probe (t.probe), and only when the breaker admits the
+	// timing (admitCanary → tryProbe: one in flight per group, [30s,5m]
+	// spacing). Everything else defers to a later cycle.
+	if breaker.blocked(key) && !admitCanary(t) {
 		return result{domain: domain, deferred: true} // group in cooldown → skip, retry a later cycle
 	}
 	// Every request is paced per server IP, so a target selected before dns-enricher reached it is resolved here.

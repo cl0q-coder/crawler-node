@@ -60,10 +60,15 @@ type Verifier struct {
 	// Scorer receives every CONCLUSIVE outcome. Required.
 	Scorer *TrustScorer
 	// KeyFor returns the node's SIGNING key — DeriveSigningKey applied to
-	// its refresh_secret, provisioned server-side at enrollment (see
-	// integrity.go KEY CONTRACT) — or nil when the node has no key on file
-	// (legacy): signature checking is skipped then.
-	KeyFor func(nodeID string) []byte
+	// its refresh_secret, provisioned server-side at enrollment and stored
+	// in the node's signing_key column (see integrity.go KEY CONTRACT).
+	// The second return reports whether a key is provisioned for the node:
+	// false means a legacy/pre-signing node with no key on file, for which
+	// the signature check is skipped (SigOK stays false; the trusted
+	// re-fetch is the only honesty check). A provisioned node (true) with
+	// a missing or invalid signature is REJECTED — the check fails closed,
+	// never open.
+	KeyFor func(nodeID string) (key []byte, provisioned bool)
 	// SampleRate in [0,1]: fraction of submissions to actually verify.
 	// 0 verifies nothing, 1 verifies everything. Sampling is TIER-BLIND:
 	// full-tier nodes are sampled at the same rate as restricted ones, so a
@@ -79,7 +84,7 @@ type Verifier struct {
 
 // NewVerifier builds a Verifier. sampleRate must be in [0,1]; maxAge <= 0
 // disables the staleness check.
-func NewVerifier(fetch Fetcher, scorer *TrustScorer, keyFor func(nodeID string) []byte, sampleRate float64, maxAge time.Duration) *Verifier {
+func NewVerifier(fetch Fetcher, scorer *TrustScorer, keyFor func(nodeID string) ([]byte, bool), sampleRate float64, maxAge time.Duration) *Verifier {
 	if scorer == nil {
 		scorer = NewTrustScorer()
 	}
@@ -143,15 +148,28 @@ func (v *Verifier) verify(ctx context.Context, sub Submission) (out Outcome) {
 	}
 
 	// 2. Signature: the node claims this content; prove the claim is the
-	// node's own and hasn't been tampered with in transit.
+	// node's own and hasn't been tampered with in transit. Fail CLOSED:
+	// a provisioned node with a missing or invalid signature is rejected
+	// outright. Only legacy nodes (no key provisioned) skip the check —
+	// and even then SigOK stays false so a skipped check is never
+	// mistaken for an enforced signature.
 	if v.KeyFor != nil {
-		secret := v.KeyFor(sub.NodeID)
-		if len(secret) > 0 && len(sub.Signature) > 0 {
-			out.SigOK = VerifyResult(secret, sub.Signature, sub.NodeID, sub.URL, sub.ClaimedHash, sub.ClaimedSimHash, sub.ClaimedAt)
-			if !out.SigOK {
-				out.Detail = "integrity signature invalid: submission tampered or misattributed"
-				return out
-			}
+		secret, provisioned := v.KeyFor(sub.NodeID)
+		switch {
+		case !provisioned:
+			// Legacy/pre-signing node: no key on file. Signature check
+			// skipped; the trusted re-fetch below is the only honesty
+			// check.
+		case len(secret) == 0 || len(sub.Signature) == 0:
+			// Provisioned node that didn't sign (or empty key on file):
+			// fail closed, do not fall through to the re-fetch.
+			out.Detail = "integrity signature missing for provisioned node: rejecting submission"
+			return out
+		case !VerifyResult(secret, sub.Signature, sub.NodeID, sub.URL, sub.ClaimedHash, sub.ClaimedSimHash, sub.ClaimedAt):
+			out.Detail = "integrity signature invalid: submission tampered or misattributed"
+			return out
+		default:
+			out.SigOK = true
 		}
 	}
 

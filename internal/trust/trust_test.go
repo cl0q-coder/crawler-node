@@ -13,11 +13,16 @@ import (
 // refreshSecret is the node's enrollment secret (what the node holds).
 func refreshSecret(nodeID string) string { return "secret-for-" + nodeID }
 
-// serverKeyFor models the server side of the KEY CONTRACT: the server
-// provisioned DeriveSigningKey(refresh_secret) at enrollment and hands it
-// to the verifier. The server never sees the plaintext refresh_secret for
-// signature purposes.
-func serverKeyFor(nodeID string) []byte { return DeriveSigningKey(refreshSecret(nodeID)) }
+// serverKeyFor models the server side of the KEY CONTRACT (decision #239,
+// option (a)): the server provisioned DeriveSigningKey(refresh_secret) at
+// enrollment — when it saw the plaintext — and stored it in the node's
+// signing_key column. KeyFor reads that column; the second return reports
+// whether a key is on file. The server never needs the plaintext
+// refresh_secret after enrollment.
+func serverKeyFor(nodeID string) ([]byte, bool) { return DeriveSigningKey(refreshSecret(nodeID)), true }
+
+// legacyKeyFor models a pre-signing node with no key on file.
+func legacyKeyFor(nodeID string) ([]byte, bool) { return nil, false }
 
 func submit(nodeID, url string, body []byte, secret []byte, at time.Time) Submission {
 	h := ContentHash(body)
@@ -77,9 +82,9 @@ func TestSignVerifyRoundtrip(t *testing.T) {
 	}
 }
 
-// TestDeriveSigningKeyIsStable: the node and the server must derive the
-// same key independently from the refresh secret — that is the whole point
-// of option (b).
+// TestDeriveSigningKeyIsStable: the node derives its signing key locally
+// and the server provisions the identical key at enrollment (decision #239,
+// option (a)) — so derivation must be deterministic and secret-dependent.
 func TestDeriveSigningKeyIsStable(t *testing.T) {
 	a := DeriveSigningKey("refresh-secret-xyz")
 	b := DeriveSigningKey("refresh-secret-xyz")
@@ -128,15 +133,57 @@ func TestKeyForBlocker(t *testing.T) {
 		t.Fatal("tampered submission matched")
 	}
 
-	// Legacy node: KeyFor returns nil -> signature skipped, re-fetch is the
-	// only check. Must not be mistaken for enforced signatures.
-	v2 := NewVerifier(trustedFetcher(pages), NewTrustScorer(), nil, 1.0, time.Hour)
+	// Legacy node: KeyFor reports no key provisioned -> signature skipped,
+	// re-fetch is the only check. Must not be mistaken for an enforced
+	// signature (SigOK stays false), and must not be rejected either.
+	v2 := NewVerifier(trustedFetcher(pages), NewTrustScorer(), legacyKeyFor, 1.0, time.Hour)
 	out = v2.VerifyOne(ctx, submit(node, "https://example.com/", body, DeriveSigningKey(refreshSecret(node)), now))
 	if out.SigOK {
-		t.Fatal("SigOK true with nil KeyFor: skipped check must not report OK")
+		t.Fatal("SigOK true with unprovisioned KeyFor: skipped check must not report OK")
 	}
 	if !out.Match {
 		t.Fatalf("legacy (unsigned) honest submission should still match on content: %s", out.Detail)
+	}
+}
+
+// TestKeyForFailClosed is the #239 fix: a PROVISIONED node with a missing
+// or invalid signature must be REJECTED, not silently skipped. Before the
+// fix, KeyFor returned nil for every node and the check failed open —
+// integrity signatures provided zero protection as deployed.
+func TestKeyForFailClosed(t *testing.T) {
+	ctx := context.Background()
+	body := []byte("<html><h1>real page</h1></html>")
+	pages := map[string][]byte{"https://example.com/": body}
+	node, now := "node-7", time.Now().Truncate(time.Second)
+
+	// Provisioned node, signature stripped: reject even though the content
+	// itself is honest.
+	v := NewVerifier(trustedFetcher(pages), NewTrustScorer(), serverKeyFor, 1.0, time.Hour)
+	sub := submit(node, "https://example.com/", body, DeriveSigningKey(refreshSecret(node)), now)
+	sub.Signature = nil
+	out := v.VerifyOne(ctx, sub)
+	if out.SigOK {
+		t.Fatal("SigOK true for provisioned node with missing signature")
+	}
+	if out.Match {
+		t.Fatal("provisioned node with missing signature was not rejected")
+	}
+
+	// Provisioned node, signature from the WRONG key: reject.
+	v2 := NewVerifier(trustedFetcher(pages), NewTrustScorer(), serverKeyFor, 1.0, time.Hour)
+	bad := submit(node, "https://example.com/", body, []byte("attacker-key-aaaaaaaaaaaaaaaa"), now)
+	out = v2.VerifyOne(ctx, bad)
+	if out.SigOK || out.Match {
+		t.Fatal("provisioned node with forged signature was not rejected")
+	}
+
+	// Provisioned node, empty key on file (corrupt provisioning): fail
+	// closed, not open.
+	emptyKey := func(nodeID string) ([]byte, bool) { return nil, true }
+	v3 := NewVerifier(trustedFetcher(pages), NewTrustScorer(), emptyKey, 1.0, time.Hour)
+	out = v3.VerifyOne(ctx, submit(node, "https://example.com/", body, DeriveSigningKey(refreshSecret(node)), now))
+	if out.SigOK || out.Match {
+		t.Fatal("provisioned node with empty key on file was not rejected")
 	}
 }
 

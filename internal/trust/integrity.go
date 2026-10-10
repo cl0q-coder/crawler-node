@@ -14,21 +14,23 @@ const signingKeyDomain = "cl0q-trust-sign/v1"
 // DeriveSigningKey derives the HMAC signing key from a node's
 // refresh_secret: SHA-256(domain || 0x00 || refresh_secret).
 //
-// KEY CONTRACT (answers "where does KeyFor get the key?"):
+// KEY CONTRACT (decision #239, option (a)):
 //
-//	The node derives this locally from the refresh_secret it received at
-//	enrollment and signs with it. The SERVER never needs the plaintext
-//	refresh_secret for signatures: at enrollment it computes
-//	DeriveSigningKey(refresh_secret), stores THAT (a separate
-//	signing_key column, or alongside the existing refresh_secret_HASH),
-//	and hands it to the verifier as KeyFor(nodeID). The raw refresh_secret
-//	is used only for auth/rotation; the signing key is a one-way derivation
-//	of it, so rotation re-keys signatures automatically.
+// The node derives its signing key locally via DeriveSigningKey applied
+// to the refresh_secret it received at enrollment, and signs submissions
+// with SignResult. The SERVER provisions the same key at enrollment: when
+// it sees the plaintext refresh_secret, it computes
+// DeriveSigningKey(refresh_secret) and stores the 32-byte result in the
+// node's signing_key column (alongside refresh_secret_HASH). KeyFor reads
+// that column. The server NEVER needs the plaintext refresh_secret after
+// enrollment, and secret rotation re-derives and updates the stored key,
+// so rotation re-keys signatures automatically.
 //
-// If KeyFor returns nil/empty (legacy node, or the server never provisioned
-// a key), the signature check is skipped — SigOK stays false and the
-// trusted re-fetch is the only honesty check. A nil KeyFor must never be
-// mistaken for "signatures are enforced".
+// Fail-closed: KeyFor reports whether a key is provisioned for the node.
+// A provisioned node with a missing or invalid signature is REJECTED —
+// the check never fails open. Only legacy nodes with no key on file skip
+// the signature check, and even then SigOK stays false so a skipped check
+// is never mistaken for an enforced signature.
 func DeriveSigningKey(refreshSecret string) []byte {
 	h := sha256.New()
 	h.Write([]byte(signingKeyDomain))

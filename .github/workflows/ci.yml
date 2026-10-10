@@ -153,10 +153,36 @@ jobs:
           name: sbom-cdx
           path: sbom.cdx.json
 
+  # Claude's ask on #143: fail the build if a compiled binary is committed.
+  # (.gitignore already anchors the six Makefile binary names + /dist/;
+  # this is the backstop for anything that slips past the ignore rules.)
+  no-binaries:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: reject committed binaries
+        run: |
+          bad=0
+          while IFS= read -r -d '' f; do
+            [ -f "$f" ] || continue
+            magic=$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')
+            case "$magic" in
+              7f454c46|feedface|feedfacf|cefaedfe|cffaedfe|cafebabe|4d5a9000)
+                echo "committed binary: $f"
+                bad=1
+                ;;
+            esac
+          done < <(git ls-files -z)
+          if [ "$bad" -ne 0 ]; then
+            echo "Binaries do not belong in the repo (see .gitignore). Remove them and recommit."
+            exit 1
+          fi
+          echo "no committed binaries found"
+
   timing:
     name: ci wall-time
     runs-on: ubuntu-latest
-    needs: [test, test-race, schema, docker, supply-chain]
+    needs: [test, test-race, schema, docker, supply-chain, no-binaries]
     if: always()
     permissions:
       contents: read

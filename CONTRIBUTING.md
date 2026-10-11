@@ -21,6 +21,9 @@ request merges only when CI is green.
 - Every bug fix comes with a test that fails without it.
 - Release candidates are tags (`rc3`, `rc4`, …). A release candidate is the exact tree that was reviewed and tested;
   changes after it go into the next one.
+- Every release ships operator-facing release notes in `docs/releases/vX.Y.Z.md`, written to the standard in
+  `docs/RELEASE-NOTES.md` (summary, what changed, explicit egress/permission/privacy callout, upgrade steps,
+  rollback steps). No release tag without notes — the tag step checks for the file.
 
 ## Rules that don't bend
 

@@ -164,3 +164,63 @@ same as today.
 - Envelope fields are **additive only**: the server ignores unknown fields,
   the node tolerates missing new fields from older peers. No breaking
   changes without a protocol version bump (this document's `v1`).
+
+## 7. Release channel — `releases.json` (Track U)
+
+Nodes check for updates against a signed release manifest. The manifest is
+the ONLY thing a node trusts about available releases; everything in it is
+verified before use.
+
+**Manifest URL:** published alongside the release artifacts (exact URL TBD
+with the release pipeline, rung U5). The document is a JSON object:
+
+```json
+{
+  "manifest": {
+    "manifest_version": 1,
+    "generated_at": "2026-10-11T20:00:00Z",
+    "channels": {
+      "stable": {
+        "latest": "0.2.0",
+        "min_supported_version": "0.1.0",
+        "releases": [
+          {
+            "version": "0.2.0",
+            "released_at": "2026-10-11T20:00:00Z",
+            "notes": "human release notes shown to the operator",
+            "egress_changes": "explicit callout of any egress/permission/privacy change",
+            "yanked": false,
+            "artifacts": {
+              "linux/amd64": {"url": "https://...", "sha256": "<64 hex chars>"}
+            }
+          }
+        ]
+      }
+    }
+  },
+  "signatures": [{"key_id": "<pinned key id>", "signature": "<base64 ed25519>"}]
+}
+```
+
+**Verification (node side, `internal/release`):**
+- The signature covers the exact bytes of the JSON-encoded `manifest`
+  object (deterministic: struct field order, sorted map keys).
+- The node pins the release public keys in the binary. A manifest is
+  accepted only if at least one signature verifies against a PINNED key.
+  Unknown `key_id`, bad encoding, or signature mismatch → reject.
+- Unknown JSON fields are rejected (fail closed on schema drift).
+- Artifact URLs must be `https:`; `sha256` must be 64 hex chars.
+- A `yanked` release is never served as an update, even if named `latest`.
+
+**Key rotation:** the node ships TWO pinned public keys. Manifests carry
+`key_id` naming the signer. Rotation = add the new public key to the
+pinned set and start signing with it; old nodes keep verifying because the
+old keys stay pinned. Removing a compromised key happens in a new node
+release. (Key custody — where the private key lives, who signs — is an
+open Chris decision; until then the pinned keys are TEST keys only.)
+
+**Consent model:** checking shows the operator current→new version, the
+human release notes, and any egress/permission/privacy change BEFORE any
+binary is downloaded. Download + apply happens only on explicit operator
+agreement, with SHA-256 + signature verification of the artifact, atomic
+swap, health check, and auto-rollback (rungs U2–U4).

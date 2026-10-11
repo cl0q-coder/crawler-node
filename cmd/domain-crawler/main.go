@@ -363,9 +363,17 @@ func main() {
 	// ALTERs are metadata-only and idempotent; indexes ship via the
 	// cl0q-search migration (CONCURRENTLY, needs Chris's approval).
 	ensureSubdomainColumns(db)
-	// Backfill pre-existing rows in the background (batched, resumable).
+	// Backfill pre-existing rows in the background (batched, resumable) —
+	// but ONLY once the migration's index is in place. Without
+	// idx_domain_info_registrable, the backfill's WHERE registrable_domain
+	// IS NULL scan is a full seq scan per batch on a 42.6M-row table, so we
+	// skip and retry on the next restart instead of hammering the DB.
 	if !*noBackfillFlag {
-		go backfillSubdomainColumns(db, 50000)
+		if registrableDomainIndexReady(db) {
+			go backfillSubdomainColumns(db, 50000)
+		} else {
+			log.Printf("[WARN] subdomain backfill: skipping — idx_domain_info_registrable not present yet (cl0q-search migration pending); backfill will run on the next restart after the migration lands")
+		}
 	}
 	// key/value runtime settings (e.g. crawl_subdomains = on to follow subdomains).
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS cl0q_settings (key TEXT PRIMARY KEY, value TEXT)`); err != nil {
@@ -708,6 +716,24 @@ func ensureSubdomainColumns(db *sql.DB) {
 			log.Printf("[WARN] ensureSubdomainColumns: %v", err)
 		}
 	}
+}
+
+// registrableDomainIndexReady probes pg_index for the migration's
+// idx_domain_info_registrable (CONCURRENTLY-built, ships via the
+// Chris-gated cl0q-search migration). Fails closed: on any probe error we
+// report not-ready so the backfill is skipped rather than running unindexed.
+func registrableDomainIndexReady(db *sql.DB) bool {
+	var ready bool
+	err := db.QueryRow(`SELECT EXISTS (
+		SELECT 1 FROM pg_index i
+		JOIN pg_class c ON c.oid = i.indexrelid
+		WHERE c.relname = 'idx_domain_info_registrable' AND i.indisvalid
+	)`).Scan(&ready)
+	if err != nil {
+		log.Printf("[WARN] subdomain backfill index probe: %v", err)
+		return false
+	}
+	return ready
 }
 
 // backfillSubdomainColumns fills registrable_domain / is_subdomain for rows

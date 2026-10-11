@@ -363,17 +363,25 @@ func main() {
 	// ALTERs are metadata-only and idempotent; indexes ship via the
 	// cl0q-search migration (CONCURRENTLY, needs Chris's approval).
 	ensureSubdomainColumns(db)
+	// Probe the migration index ONCE and cache the result. Both the backfill
+	// gate below and the per-flush cap check need idx_domain_info_registrable;
+	// without it the backfill's WHERE registrable_domain IS NULL scan AND the
+	// cap check's GROUP BY are full seq scans per batch on a 42.6M-row table.
+	// While the index is absent (Chris-gated cl0q-search migration pending)
+	// the backfill is skipped and the per-flush cap check runs fail-open.
+	subdomainIdxReady := registrableDomainIndexReady(db)
 	// Backfill pre-existing rows in the background (batched, resumable) —
-	// but ONLY once the migration's index is in place. Without
-	// idx_domain_info_registrable, the backfill's WHERE registrable_domain
-	// IS NULL scan is a full seq scan per batch on a 42.6M-row table, so we
-	// skip and retry on the next restart instead of hammering the DB.
+	// but ONLY once the migration's index is in place, so we skip and retry
+	// on the next restart instead of hammering the DB.
 	if !*noBackfillFlag {
-		if registrableDomainIndexReady(db) {
+		if subdomainIdxReady {
 			go backfillSubdomainColumns(db, 50000)
 		} else {
 			log.Printf("[WARN] subdomain backfill: skipping — idx_domain_info_registrable not present yet (cl0q-search migration pending); backfill will run on the next restart after the migration lands")
 		}
+	}
+	if !subdomainIdxReady {
+		log.Printf("[WARN] subdomain cap: idx_domain_info_registrable not present — per-flush cap check disabled (fail open) until the migration lands")
 	}
 	// key/value runtime settings (e.g. crawl_subdomains = on to follow subdomains).
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS cl0q_settings (key TEXT PRIMARY KEY, value TEXT)`); err != nil {
@@ -455,7 +463,7 @@ func main() {
 				buf = buf[:0]
 				return
 			}
-			buf = filterSubdomainCap(db, buf, *maxSubsPerParentFlag)
+			buf = filterSubdomainCap(db, buf, *maxSubsPerParentFlag, subdomainIdxReady)
 			inserted += flushDomains(db, spool, buf)
 			buf = buf[:0]
 		}
@@ -797,9 +805,19 @@ func backfillSubdomainColumns(db *sql.DB, batchSize int) {
 // inflating the DB once the cap is reached. Non-subdomains always pass.
 // Best-effort: on DB error the batch passes through unfiltered (fail open —
 // discovery continues). maxSubs <= 0 disables the cap.
+// idxReady is the cached startup probe of idx_domain_info_registrable: the
+// GROUP BY below needs that index, and without it every flush would seq-scan
+// the 42.6M-row domain_info table, so the check is skipped (fail open) while
+// the Chris-gated migration is pending (logged once at startup).
 // Note: counts come from the registrable_domain column, so the cap is exact
 // once the startup backfill completes; until then it is approximate (fail open).
-func filterSubdomainCap(db *sql.DB, batch []pendDomain, maxSubs int) []pendDomain {
+func filterSubdomainCap(db *sql.DB, batch []pendDomain, maxSubs int, idxReady bool) []pendDomain {
+	if maxSubs <= 0 || len(batch) == 0 {
+		return batch
+	}
+	if !idxReady {
+		return batch
+	}
 	if maxSubs <= 0 || len(batch) == 0 {
 		return batch
 	}

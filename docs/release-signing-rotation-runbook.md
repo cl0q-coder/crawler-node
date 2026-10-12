@@ -5,25 +5,32 @@ release (Chris's ruling, QA doc 2026-10-11). This runbook governs the
 Ed25519 release-signing key that signs `releases.json` and the per-artifact
 signatures the node's pinned keys verify (U1 mechanism, U5 pipeline).
 
-## Custody (FINAL — Chris, 2026-10-11)
+## Custody (FINAL — Chris, 2026-10-11; updated per Chris's 2026-10-11 18:45 custody reassignment)
 
-- The private release-signing key lives **OFFLINE**, held by Chris, ideally
-  on a hardware key.
-- Releases are signed in a **review-gated step**. The private key is NEVER a
-  plaintext secret on the shared CI runner.
-- Nodes ship **two pinned public keys** (primary + secondary). A key can
+- The private release-signing keys are held by **Dutch** (custodian).
+  Deputy signer: **Micah**.
+- Two keypairs exist, generated 2026-10-11 by Dutch (crawler-node #252):
+  **Key A** signs releases now; **Key B** is the pre-pinned successor so a
+  future rotation does not brick nodes that only know A.
+- The private keys are NEVER plaintext on the shared CI runner and are never
+  posted in any channel, doc, or issue. Only the base64 public halves leave
+  Dutch's box (pinned in U1's `DefaultKeyring`, PR #251).
+- Private halves are stored with an AES-256-CBC (pbkdf2 100k) encrypted
+  backup, round-trip verified. OPERATIONAL NOTE (2026-10-11): the backup
+  passphrase is currently co-located on the same host — moving a backup copy
+  plus passphrase to Chris's offline storage is outstanding and must happen
+  before the first signed release.
+- Releases are signed in a **review-gated step**.
+- Nodes ship **two pinned public keys** (primary A + secondary B). A key can
   rotate without bricking nodes that only know the old one.
-- Named signers (audit trail): Chris + one deputy (deputy TBD by Chris).
-- The real keypair must be generated from Chris's hardware key before the
-  first signed release; U1's test keys are swapped to the real pinned
-  pubkeys as a drop-in at that point.
 
 ## Planned rotation (non-emergency)
 
 Do this once a year, or whenever the signer roster changes.
 
-1. **Generate the successor keypair** on the offline signing machine (Chris
-   or the named deputy). Never copy the private key to a networked host.
+1. **Generate the successor keypair** on the custodian's signing machine
+   (Dutch, or the named deputy Micah). Never copy the private key to a
+   networked host beyond the custodian's.
 2. **Overlap-sign.** For one release cycle, sign `releases.json` and the
    artifacts with BOTH the old key and the new key. The manifest carries both
    signatures; U1's verifier accepts either pinned key.
@@ -73,7 +80,10 @@ Do this once a year, or whenever the signer roster changes.
 ## What gates what
 
 - **U1** ships the verify mechanism with TEST keys only — no real key needed.
-- **First signed release / U5 wiring** is blocked on: real keypair generated
-  from Chris's hardware key, deputy signer named, and THIS runbook in the repo.
+- **First signed release / U5 wiring** is blocked on: real keypairs generated
+  (done — Dutch, 2026-10-11, #252), deputy signer named (done — Micah),
+  offline backup copy + passphrase moved to Chris's offline storage
+  (outstanding), and THIS runbook in the repo.
 - U5's real-key wiring swaps U1's `DefaultKeyring` test keys for the real
-  pinned pubkeys (one-line drop-in, clearly marked TODO).
+  pinned pubkeys (one-line drop-in, clearly marked TODO; PR #251 pins Dutch's
+  #252 public halves).

@@ -42,11 +42,11 @@
 // this is deterministic for a given manifest value. The signature covers
 // the "manifest" object only, never the "signatures" array.
 //
-// KEY CUSTODY (open decision): Chris has not yet decided where the private
-// release-signing key lives or who may sign a release. Until then this
-// package pins TEST keys only (see keys.go: TestPinnedKeys). Nothing here
-// is production key material. Swapping in the real production public keys
-// later is a one-line change (DefaultKeyring).
+// KEY CUSTODY: DECIDED (Chris, 2026-10-11; reassigned Chris -> Dutch 18:45
+// MDT). Dutch holds the private Ed25519 release-signing keys offline with an
+// encrypted backup. This package pins the PRODUCTION public keys (see keys.go:
+// PinnedKeys); test fixtures live in TestPinnedKeys and must never sign a
+// real release.
 package release
 
 import (

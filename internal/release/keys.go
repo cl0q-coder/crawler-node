@@ -1,16 +1,19 @@
 // Pinned release-signing keys and the keyring.
 //
-// KEY CUSTODY IS AN OPEN DECISION (Chris, 2026-10-11): where the private
-// release-signing key lives and who may sign a release has NOT been decided.
-// Until it is, this file pins TEST KEYS ONLY. They are named Test* and
-// documented as test fixtures throughout. NEVER treat these as production
-// keys, and never sign a real release with the matching test private keys
-// (kept in release_test.go fixtures).
+// KEY CUSTODY: DECIDED (Chris, 2026-10-11; custody reassigned Chris -> Dutch
+// 2026-10-11 18:45 MDT). Dutch generated the two Ed25519 keypairs on his own
+// box and holds the private halves OFFLINE with an encrypted backup. The
+// private keys have never entered any channel, doc, or issue. Releases are
+// signed in a review-gated step; the key is NEVER plaintext on the shared
+// CI runner. Named signers for the audit trail: Dutch (custodian) + Micah
+// (deputy).
 //
-// Going production is a one-line change: build the real Keyring from the
-// real public keys and assign it to DefaultKeyring (or pass it explicitly
-// to ParseAndVerify). The two-key mechanism below is how rotation works
-// without bricking old nodes:
+// PinnedKeys below are the PRODUCTION public keys. TestPinnedKeys remain as
+// test fixtures for the unit tests (their private halves live in
+// release_test.go and must NEVER sign a real release).
+//
+// The two-key mechanism below is how rotation works without bricking old
+// nodes:
 //
 //  1. Ship TWO pinned public keys from day one (A and B).
 //  2. Sign every manifest with ONE of them (key_id says which).
@@ -22,7 +25,8 @@
 //     that is why compromise response also means yanking releases and
 //     shipping the new node build fast (Track U rung U7 covers rollout).
 //
-// Generating a production keypair (run once, offline, when Chris decides):
+// Generating a production keypair (done 2026-10-11 by Dutch, crawler-node#252;
+// documented here for the next rotation):
 //
 //	priv := ed25519.GenerateKey(rand.Reader) // keep the seed OFFLINE
 //	pub  := priv.Public().(ed25519.PublicKey)
@@ -116,7 +120,20 @@ var TestPinnedKeys = []PinnedKey{
 	},
 }
 
+// PinnedKeys are the PRODUCTION pinned public keys. Key A signs releases;
+// key B is the pre-pinned successor for rotation. Private halves held
+// offline by Dutch (custodian), generated 2026-10-11 (crawler-node#252).
+var PinnedKeys = []PinnedKey{
+	{
+		ID:     "release-key-a",
+		PubKey: mustDecodeTestKey("WWQO4MNlk9PWWKBH/aB086vm9TAmKzicwI3tVqE4sNU="),
+	},
+	{
+		ID:     "release-key-b",
+		PubKey: mustDecodeTestKey("HLH50Rn1KPVjUgEgxQzudQdBItdzycv5/iaZcSfxrPE="),
+	},
+}
+
 // DefaultKeyring is what ParseAndVerify uses when the caller does not pass
-// a keyring explicitly. TODAY it pins the TEST keys. When Chris decides
-// key custody, replace this with NewKeyring(realKeyA, realKeyB).
-var DefaultKeyring, _ = NewKeyring(TestPinnedKeys...)
+// a keyring explicitly. It pins the PRODUCTION keys.
+var DefaultKeyring, _ = NewKeyring(PinnedKeys...)

@@ -38,11 +38,9 @@ type checkResult struct {
 }
 
 func main() {
-	for _, a := range os.Args[1:] {
-		if a == "-version" || a == "--version" {
-			fmt.Println("preflight", version.Version)
-			return
-		}
+	// -version before anything else (full provenance report).
+	if version.HandleVersionFlag("preflight") {
+		return
 	}
 	config.SetMemoryLimitDefault(512 << 20) // preflight is light; 512MiB is plenty
 

@@ -79,11 +79,11 @@ Do this once a year, or whenever the signer roster changes.
 
 ## What gates what
 
-- **U1** ships the verify mechanism with TEST keys only — no real key needed.
+- **U1** pins the real production keys (#252 public halves, pinned in `DefaultKeyring` by PR #251) — no TEST keys in the shipped path.
 - **First signed release / U5 wiring** is blocked on: real keypairs generated
   (done — Dutch, 2026-10-11, #252), deputy signer named (done — Micah),
   offline backup copy + passphrase moved to Chris's offline storage
   (outstanding), and THIS runbook in the repo.
-- U5's real-key wiring swaps U1's `DefaultKeyring` test keys for the real
-  pinned pubkeys (one-line drop-in, clearly marked TODO; PR #251 pins Dutch's
-  #252 public halves).
+- U5's wiring consumes the real keys already pinned by U1's `DefaultKeyring`
+  (PR #251, 9fd836d): the verify path reads the pinned production pubkeys
+  directly — nothing to swap, only the release-ceremony flow from this runbook.

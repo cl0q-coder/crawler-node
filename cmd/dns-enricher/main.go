@@ -29,6 +29,7 @@ import (
 
 	"cl0q/dbresil"
 	"cl0q/internal/config"
+	"cl0q/internal/version"
 	"github.com/lib/pq"
 	"golang.org/x/net/publicsuffix"
 )
@@ -163,6 +164,10 @@ func validateConfig() {
 }
 
 func main() {
+	// -version before anything else (full provenance report).
+	if version.HandleVersionFlag("dns-enricher") {
+		return
+	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)

@@ -1,6 +1,8 @@
 # cl0q crawler node — release Makefile.
 #
-#   make build    compile all binaries to ./dist/
+#   make build    compile all binaries to ./dist/ (clean tree required;
+#               embeds commit SHA + build time provenance stamp)
+#   make dev-build dirty-tree-friendly dev builds (stamp reads dev-<sha>)
 #   make test     run the full test suite
 #   make sbom     generate the CycloneDX SBOM (needs cyclonedx-gomod)
 #   make docker   build the node image tagged with VERSION
@@ -16,17 +18,34 @@
 #        docker push registry.example.com/cl0q-node:$(cat VERSION)
 
 VERSION := $(shell cat VERSION)
+# Provenance stamp (Track O, O2/O3): every binary embeds the exact source
+# commit it was built from, plus the UTC build time. A stamp is only
+# meaningful on a clean tree — `build` refuses dirty trees below.
+COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+BUILDTIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 BINARIES := website-crawler domain-crawler dns-enricher asn-enricher cl0q-node preflight
-LDFLAGS := -s -w -X cl0q/internal/version.Version=$(VERSION)
+LDFLAGS := -s -w -X cl0q/internal/version.Version=$(VERSION) -X cl0q/internal/version.Commit=$(COMMIT) -X cl0q/internal/version.BuildTime=$(BUILDTIME)
 
-.PHONY: build test vet sbom docker release clean
+.PHONY: build dev-build test vet sbom docker release clean
 
+# Canonical build: from a clean tree only, so the embedded commit SHA is a
+# true provenance stamp. This is how prod binaries are built (Track O O2):
+# pin a commit, build from it, verify with `<binary> --version`.
 build:
+	@test -z "$$(git status --porcelain)" || (echo "refusing: working tree not clean — commit or stash first (or use 'make dev-build')" && exit 1)
 	mkdir -p dist
 	set -e; for c in $(BINARIES); do \
 		CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o dist/$$c ./cmd/$$c; \
 	done
-	@echo "built $(VERSION): $$(ls dist/)"
+	@echo "built $(VERSION) @ $(COMMIT): $$(ls dist/)"
+
+# Dev builds: no clean-tree requirement; commit stamp reads dev-<sha>.
+dev-build:
+	mkdir -p dist
+	set -e; for c in $(BINARIES); do \
+		CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X cl0q/internal/version.Version=$(VERSION) -X cl0q/internal/version.Commit=dev-$(COMMIT) -X cl0q/internal/version.BuildTime=$(BUILDTIME)" -o dist/$$c ./cmd/$$c; \
+	done
+	@echo "dev-built $(VERSION): $$(ls dist/)"
 
 test:
 	go test -count=1 $$(go list ./... | grep -v /vendor/)

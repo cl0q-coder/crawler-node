@@ -55,6 +55,7 @@ import (
 	"cl0q/dbresil"
 	"cl0q/internal/config"
 	"cl0q/internal/footprint"
+	"cl0q/internal/version"
 	"cl0q/netguard"
 	"cl0q/robotstxt"
 )
@@ -321,6 +322,10 @@ func validateConfig() {
 }
 
 func main() {
+	// -version before anything else (full provenance report).
+	if version.HandleVersionFlag("domain-crawler") {
+		return
+	}
 	flag.Parse()
 	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)

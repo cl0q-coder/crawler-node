@@ -754,6 +754,10 @@ func isBlacklisted(domain string, info *WebsiteInfo) (string, bool) {
 }
 
 func main() {
+	// -version before anything else (full provenance report).
+	if version.HandleVersionFlag("website-crawler") {
+		return
+	}
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)

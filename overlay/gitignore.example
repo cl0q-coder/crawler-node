@@ -1,0 +1,7 @@
+# Overlay-repo .gitignore example — copy to .gitignore in the PRIVATE
+# overlay repo. Real secrets must never be committable.
+.env
+docker-compose.override.yml
+*.pem
+*.key
+*-backup*.tar*

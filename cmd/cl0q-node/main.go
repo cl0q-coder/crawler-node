@@ -141,12 +141,9 @@ func validateConfig() {
 }
 
 func main() {
-	// -version before anything else.
-	for _, a := range os.Args[1:] {
-		if a == "-version" || a == "--version" {
-			fmt.Println("cl0q-node", version.Version)
-			return
-		}
+	// -version before anything else (full provenance report).
+	if version.HandleVersionFlag("cl0q-node") {
+		return
 	}
 	// Subcommand before flag parsing: `cl0q-node enroll` (PROTOCOL.md §1).
 	if len(os.Args) > 1 && os.Args[1] == "enroll" {

@@ -155,6 +155,11 @@ func main() {
 		runStatusCommand(os.Args[2:])
 		return
 	}
+	// Track U rung U2: `cl0q-node update` — signed-manifest update check.
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		runUpdateCommand(os.Args[2:])
+		return
+	}
 	flag.Parse()
 	validateConfig() // NR2: refuse to start on any invalid knob, before anything else runs
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)

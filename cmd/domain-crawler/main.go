@@ -18,6 +18,10 @@ package main
 //     naming cl0q-node or any other cl0q bot name beats "*"; Crawl-delay is honoured (capped at 30 s);
 //   * at most -per-host-pages (≤25) pages per site per cycle, at least -host-delay-ms (≥2 s) apart — robots.txt, its
 //     http fallback and redirect hops included (other sites are served while one waits);
+//   * the per-host floors are GLOBAL across the -discovery-workers fetch workers (host-aware dispatcher,
+//     cmd/domain-crawler/dispatcher.go): a worker only receives a URL when its host is eligible, so the same
+//     host is serialized across workers while different hosts proceed in parallel. Concurrency changes the
+//     execution model, NOT the floors;
 //   * redirects are followed only on the same host, at most 5 hops, each robots-checked and paced; a redirect to any
 //     other host is handed back to the queue, where it gets that host's own robots.txt and pacing;
 //   * login, admin, account, cart, search and query-string URLs and non-HTML files are never fetched;
@@ -92,12 +96,15 @@ var (
 	dsnFlag       = flag.String("dsn", envOr("DATABASE_URL", "postgres://cl0q:cl0q@localhost:5432/cl0q?sslmode=disable"), "PostgreSQL DSN")
 	idleFlag      = flag.Duration("idle", 60*time.Second, "pause before re-seeding when the queue drains")
 	maxPages      = flag.Int("max-pages", 5000, "max pages per BFS cycle before re-seeding (bounds memory)")
-	maxConns      = flag.Int("max-conns", 4, "max DB connections (BFS is sequential; capped for the shared 100-conn DB)")
+	maxConns      = flag.Int("max-conns", 4, "max DB connections (dispatch loop is single-goroutine; capped for the shared 100-conn DB)")
 	dbSeedsN      = flag.Int("db-seeds", 200, "random existing domain_info domains added as seeds each cycle (0=off) — mines known domains for new outbound links to beat the fixed-seed plateau")
 	batchFlag     = flag.Int("db-batch", envInt("DB_BATCH", 200), "discovered domains buffered per INSERT (one commit) — fewer commits = far less remote DB load")
 	noBackfillFlag = flag.Bool("no-subdomain-backfill", false, "skip the background backfill of registrable_domain/is_subdomain for pre-existing rows")
 	maxSubsPerParentFlag = flag.Int("max-subdomains-per-parent", envInt("MAX_SUBDOMAINS_PER_PARENT", 10000), "max subdomains stored per registrable parent (0=off) — caps runaway discovery from wildcard DNS or huge platforms")
 	queueCap      = flag.Int("queue-cap", envInt("QUEUE_CAP", 50000), "max URLs queued at once (bounds BFS memory; 0=unbounded). Fan-out pages can otherwise push this to 500k+ and OOM the box.")
+	// A2 (#133): concurrent fetch workers. Tunable DOWN only — fewer workers is gentler; the politeness floors
+	// stay one-directional, so more workers can never buy speed past them.
+	discoveryWorkers = flag.Int("discovery-workers", envInt("DISCOVERY_WORKERS", maxDiscoveryWorkers), "concurrent discovery fetch workers (at most 16; tunable down only)")
 	// A site gets at most perHostPages pages per cycle, at least hostDelayMs apart
 	// (or its robots Crawl-delay, if longer). Other sites' pages are served while one waits, so pacing costs
 	// little throughput.
@@ -107,15 +114,12 @@ var (
 
 // Politeness floors. Settings can only make the crawler slower or gentler than these (see the header).
 const (
-	minHostDelayMs  = 2000             // between requests to one host
-	maxPerHostPages = 25               // pages per site per cycle
-	minIdle         = 60 * time.Second // pause before a new cycle re-seeds (seeds are re-fetched every cycle)
-	maxRedirects    = 5                // redirect hops followed, same host only
+	minHostDelayMs      = 2000             // between requests to one host
+	maxPerHostPages     = 25               // pages per site per cycle
+	minIdle             = 60 * time.Second // pause before a new cycle re-seeds (seeds are re-fetched every cycle)
+	maxRedirects        = 5                // redirect hops followed, same host only
+	maxDiscoveryWorkers = 16               // DISCOVERY_WORKERS ceiling: tunable down only, never up
 )
-
-// robotsCache maps host -> parsed rules, filled during a cycle and reset at the top of each cycle (bounds memory).
-// The BFS loop is single-goroutine, so no lock is needed.
-var robotsCache = map[string]*robotRules{}
 
 // robotRules is one host's robots.txt verdict (see package robotstxt), plus whether the site refused the robots.txt
 // request outright.
@@ -316,6 +320,8 @@ func validateConfig() {
 	// slower or gentler than these, never faster.
 	config.CheckDurationRange("host-delay-ms", time.Duration(*hostDelayMs)*time.Millisecond, time.Duration(minHostDelayMs)*time.Millisecond, time.Hour)
 	config.CheckIntRange("per-host-pages", *perHostPages, 1, maxPerHostPages)
+	// A2: worker count is tunable DOWN only — 1..16, never above the ceiling.
+	config.CheckIntRange("discovery-workers", *discoveryWorkers, 1, maxDiscoveryWorkers)
 	config.CheckIntRange("SPOOL_MAX_ROWS", config.GetInt("SPOOL_MAX_ROWS", 500000), 0, 2000000)
 	config.CheckIntRange("NODE_MAX_DOMAINS", config.GetInt("NODE_MAX_DOMAINS", 1000000), 0, 10000000)
 	config.CheckIntRange("NODE_MAX_PAGES", config.GetInt("NODE_MAX_PAGES", 1000000), 0, 10000000)
@@ -399,7 +405,7 @@ func main() {
 	}
 	fixedSeeds := loadSeeds()
 	log.Printf("[INFO] domain-crawler: %d fixed seeds + %d db-seeds/cycle, max-depth=%d, max-pages=%d -> domain_info @ %s", len(fixedSeeds), *dbSeedsN, *maxDepth, *maxPages, host)
-	log.Printf("[INFO] politeness: host_delay=%s per_host_pages=%d idle=%s max_redirects=%d robots=always", time.Duration(*hostDelayMs)*time.Millisecond, *perHostPages, *idleFlag, maxRedirects)
+	log.Printf("[INFO] politeness: host_delay=%s per_host_pages=%d idle=%s max_redirects=%d robots=always workers=%d", time.Duration(*hostDelayMs)*time.Millisecond, *perHostPages, *idleFlag, maxRedirects, *discoveryWorkers)
 	for i, s := range fixedSeeds {
 		log.Printf("[INFO]   seed[%d] %s", i, s)
 	}
@@ -435,146 +441,57 @@ func main() {
 			seeds = append(seeds, extra...)
 			log.Printf("[INFO] cycle seeds: %d fixed + %d sampled from domain_info (crawl_subdomains=%v)", len(fixedSeeds), len(extra), crawlSubs)
 		}
-		robotsCache = map[string]*robotRules{} // fresh robots rules each cycle (bounds memory)
-		visited := map[string]bool{}
-		hostLast := map[string]time.Time{} // last request (robots or page) per host this cycle
-		hostPages := map[string]int{}      // pages fetched per host this cycle (capped at -per-host-pages)
-		hostQueued := map[string]int{}     // URLs queued per host (don't fill the queue with a capped site)
-		deferred := 0                      // consecutive queue items pushed back because their host wasn't due yet
-		seenDomain := map[string]bool{}
-		queue := make([]item, 0, len(seeds))
-		for _, s := range seeds {
-			if visited[s] {
-				continue
-			}
-			// Apex-only: don't even seed from a subdomain — its links are sibling subdomains
-			// we'd filter anyway, so it just wastes a fetch.
-			if !crawlSubs {
-				if u, err := url.Parse(s); err == nil && crawlutil.IsSubdomain(u.Hostname()) {
-					continue
-				}
-			}
-			visited[s] = true
-			queue = append(queue, item{s, 0})
-		}
-		var discovered, inserted, pages int
-		lastBeat := time.Now()
-		// Buffer discovered domains and insert them in batches of *batchFlag (one commit per
-		// batch instead of one per domain) — the main reduction in remote-Postgres load.
-		buf := make([]pendDomain, 0, *batchFlag)
-		flush := func() {
+		// A2 (#133): the host-aware dispatcher runs this cycle's frontier. All
+		// per-host politeness state (last fetch, pages this cycle, robots
+		// verdict, in-flight reservation) is owned by the dispatcher's
+		// goroutine and holds GLOBALLY across the worker pool — concurrency
+		// changes the execution model, NOT the floors.
+		dis := newDispatcher(dispatchConfig{
+			workers:    *discoveryWorkers,
+			hostDelay:  time.Duration(*hostDelayMs) * time.Millisecond,
+			perHostCap: *perHostPages,
+			batchSize:  *batchFlag,
+			queueCap:   *queueCap,
+			maxDepth:   *maxDepth,
+			maxPages:   *maxPages,
+			crawlSubs:  crawlSubs,
+		}, realFetch, func(buf []pendDomain) int {
+			// Buffer discovered domains and insert them in batches of *batchFlag (one commit per
+			// batch instead of one per domain) — the main reduction in remote-Postgres load.
 			if pause, reason := fp.PauseDiscovery(); pause {
 				log.Printf("[INFO] %s — %d new domains not stored", reason, len(buf))
-				buf = buf[:0]
-				return
+				return 0
 			}
+			// #234: cap subdomains per registrable parent before flushing.
 			buf = filterSubdomainCap(db, buf, *maxSubsPerParentFlag, subdomainIdxReady)
-			inserted += flushDomains(db, spool, buf)
-			buf = buf[:0]
-		}
-
-		for len(queue) > 0 && ctx.Err() == nil {
-			// Time-based heartbeat at the TOP of the loop: robots fetches, deferrals and skips `continue` before the
-			// page-count heartbeat below, and a fresh cycle fetches every seed's robots.txt before its first page —
-			// without this the log went quiet for minutes and the health check would read it as a stall.
+			return flushDomains(db, spool, buf)
+		})
+		dis.start()
+		dis.seed(seeds)
+		lastBeat := time.Now()
+		for !dis.drained() && ctx.Err() == nil {
+			// Time-based heartbeat at the TOP of the loop so the log keeps
+			// advancing (and the health check sees the crawler alive) even
+			// while every worker is waiting out a host's gap.
 			if time.Since(lastBeat) >= 45*time.Second {
-				log.Printf("[INFO] pages=%d queue=%d domains_seen=%d new_inserted=%d robots_checked=%d", pages, len(queue), discovered, inserted, len(robotsCache))
+				log.Printf("[INFO] pages=%d queue=%d domains_seen=%d new_inserted=%d robots_checked=%d",
+					dis.pages, len(dis.queue), dis.discovered, dis.inserted, dis.robotsFetched)
 				lastBeat = time.Now()
 			}
-			cur := queue[0]
-			queue = queue[1:]
-			cu, err := url.Parse(cur.url)
-			if err != nil || cu.Hostname() == "" {
-				continue
-			}
-			host := strings.ToLower(cu.Hostname())
-			if hostPages[host] >= *perHostPages || (cur.depth > 0 && skipURL(cu)) {
-				continue
-			}
-			rules := robotsCache[host]
-			gap := time.Duration(*hostDelayMs) * time.Millisecond
-			if rules != nil && rules.Delay() > gap {
-				gap = rules.Delay()
-			}
-			if wait := gap - time.Since(hostLast[host]); wait > 0 {
-				if deferred < len(queue) { // another site is ready → serve it first, come back to this one
-					queue = append(queue, cur)
-					deferred++
-					continue
-				}
-				if !dbresil.SleepCtx(ctx, wait) { // every queued URL is waiting on its site's gap → wait this one out
-					break
-				}
-			}
-			deferred = 0
-			if rules == nil {
-				// First contact with this site this cycle: robots.txt is its own (paced) request; the page waits
-				// behind the gap like any other — no back-to-back robots+page hits.
-				rules = fetchRobotsRules(host, gap)
-				robotsCache[host] = rules
-				hostLast[host] = time.Now()
-				if !rules.blocked && rules.allows(cu) {
-					queue = append(queue, cur)
-				}
-				continue
-			}
-			if rules != nil && (rules.blocked || !rules.allows(cu)) {
-				continue
-			}
-			pages++
-			hostPages[host]++
-			links := safeCrawl(cur.url, rules, gap)
-			hostLast[host] = time.Now()
-			for _, raw := range links {
-				dom, full := resolveLink(raw, cur.url)
-				reg := crawlutil.Registrable(dom)
-				if reg == "" {
-					continue // no link, an IP, or a bare public suffix (co.ke) — never a site
-				}
-				// Apex-only: FOLD a subdomain link to its registrable site (blog.acme.com → acme.com,
-				// news.nation.co.ke → nation.co.ke) rather than dropping it — captures the parent apex (breadth)
-				// WITHOUT re-introducing fan-out (one apex per family, deduped by seenDomain). full="" so we
-				// don't BFS the subdomain URL itself; the apex is crawled by website-crawler.
-				if !crawlSubs && crawlutil.IsSubdomain(dom) {
-					dom = reg
-					full = ""
-				}
-				if !seenDomain[dom] {
-					seenDomain[dom] = true
-					discovered++
-					buf = append(buf, resolveDomain(dom, cur.url))
-					if len(buf) >= *batchFlag {
-						flush()
-					}
-				}
-				// Bounded enqueue: stop growing the frontier past -queue-cap so a fan-out
-				// burst can't balloon the queue/visited maps and OOM the box.
-				if full != "" && cur.depth < *maxDepth && !visited[full] && hostQueued[dom] < *perHostPages &&
-					(*queueCap <= 0 || len(queue) < *queueCap) {
-					if fu, err := url.Parse(full); err == nil && !skipURL(fu) {
-						visited[full] = true
-						hostQueued[strings.ToLower(fu.Hostname())]++
-						queue = append(queue, item{full, cur.depth + 1})
-					}
-				}
-			}
-			// Every 50 pages OR every 45s — the time-based heartbeat keeps the log
-			// advancing during slow (DNS-bound) deep crawls so the health check sees
-			// the crawler is alive within its 5-min window.
-			if pages%50 == 0 || time.Since(lastBeat) >= 45*time.Second {
-				log.Printf("[INFO] pages=%d queue=%d domains_seen=%d new_inserted=%d", pages, len(queue), discovered, inserted)
-				lastBeat = time.Now()
-			}
-			if pages >= *maxPages {
-				log.Printf("[INFO] page cap %d reached (queue had %d) — re-seeding to free memory", *maxPages, len(queue))
+			if !dis.pump(ctx) {
 				break
 			}
 		}
-		flush() // flush the cycle's remaining buffered domains
+		if dis.capped {
+			log.Printf("[INFO] page cap %d reached (queue had %d) — re-seeding to free memory", *maxPages, len(dis.queue))
+		}
+		// Stop after the pages in flight; discovered domains still buffered
+		// are written before the cycle ends — never lost, including on shutdown.
+		dis.shutdown()
 		if ctx.Err() != nil {
 			break
 		}
-		log.Printf("[INFO] crawl drained: pages=%d domains_seen=%d new_inserted=%d — re-seeding in %s", pages, discovered, inserted, *idleFlag)
+		log.Printf("[INFO] crawl drained: pages=%d domains_seen=%d new_inserted=%d — re-seeding in %s", dis.pages, dis.discovered, dis.inserted, *idleFlag)
 		dbresil.SleepCtx(ctx, *idleFlag)
 	}
 	log.Printf("[INFO] stopped: shutdown signal received, buffered domains written")

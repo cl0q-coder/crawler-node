@@ -52,13 +52,54 @@ type updateReport struct {
 }
 
 func runUpdateCommand(args []string) {
+	// Subcommand: `cl0q-node update apply` (Track U rung U3).
+	if len(args) > 0 && args[0] == "apply" {
+		runUpdateApplyCommand(args[1:])
+		return
+	}
+
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	manifestURL := fs.String("manifest-url", "", "releases.json URL (default: CL0Q_RELEASE_MANIFEST_URL or the provisional U5 URL)")
 	channel := fs.String("channel", "stable", "release channel to check")
 	jsonOut := fs.Bool("json", false, "output as JSON")
 	_ = fs.Parse(args)
 
-	murl := *manifestURL
+	m, _ := fetchVerifiedManifest(*manifestURL)
+
+	rep, err := buildUpdateReport(m, *channel, version.Version)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "update: %v\n", err)
+		os.Exit(1)
+	}
+
+	if *jsonOut {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(rep)
+		return
+	}
+	if rep.Available {
+		fmt.Printf("Update available: %s -> %s (channel %s)\n", rep.From, rep.To, rep.Channel)
+	} else {
+		fmt.Printf("Up to date: %s (channel %s, latest %s)\n", rep.From, rep.Channel, rep.To)
+	}
+	if rep.Notes != "" {
+		fmt.Printf("Notes: %s\n", rep.Notes)
+	}
+	if rep.EgressDelta != "" {
+		fmt.Printf("Egress/permission changes: %s\n", rep.EgressDelta)
+	}
+	if rep.Warning != "" {
+		fmt.Printf("WARNING: %s\n", rep.Warning)
+	}
+}
+
+// fetchVerifiedManifest resolves the manifest URL (flag > env > provisional),
+// fetches releases.json, and verifies it against the pinned keys. It exits
+// non-zero on any failure: an unverified manifest is never trusted.
+// Shared by `update` (rung U2) and `update apply` (rung U3).
+func fetchVerifiedManifest(flagURL string) (*release.Manifest, string) {
+	murl := flagURL
 	if murl == "" {
 		murl = os.Getenv("CL0Q_RELEASE_MANIFEST_URL")
 	}
@@ -99,33 +140,7 @@ func runUpdateCommand(args []string) {
 		fmt.Fprintf(os.Stderr, "Refusing to trust any release info from an unverified manifest.\n")
 		os.Exit(1)
 	}
-
-	rep, err := buildUpdateReport(m, *channel, version.Version)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "update: %v\n", err)
-		os.Exit(1)
-	}
-
-	if *jsonOut {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(rep)
-		return
-	}
-	if rep.Available {
-		fmt.Printf("Update available: %s -> %s (channel %s)\n", rep.From, rep.To, rep.Channel)
-	} else {
-		fmt.Printf("Up to date: %s (channel %s, latest %s)\n", rep.From, rep.Channel, rep.To)
-	}
-	if rep.Notes != "" {
-		fmt.Printf("Notes: %s\n", rep.Notes)
-	}
-	if rep.EgressDelta != "" {
-		fmt.Printf("Egress/permission changes: %s\n", rep.EgressDelta)
-	}
-	if rep.Warning != "" {
-		fmt.Printf("WARNING: %s\n", rep.Warning)
-	}
+	return m, murl
 }
 
 // buildUpdateReport compares nodeVersion against the channel's latest

@@ -108,9 +108,13 @@ cd tools/274-comparison/scrapy && scrapy crawl bench
    (gates armed, non-binding) would show where parse/TLS efficiency
    differences actually appear — likely where our HTML parsing gains (above)
    and Colly's lighter RSS matter.
-3. **Nutch/StormCrawler legs remain**: both are JVM drivers like Heritrix;
-   they will show whether Heritrix's frontier advantage is general to the
-   JVM-frontier design or Heritrix-specific.
+3. **Politeness semantics warning for the Nutch/StormCrawler camps**: both
+   fetch robots.txt *inline in the fetcher thread*, so their per-host delay
+   gates are non-binding for robots-first workloads (Nutch 0.049s, StormCrawler
+   0.003s observed min gaps vs 1.0s configured). Anyone comparing crawlers on
+   politeness compliance should verify effective, not configured, gaps.
+   Heritrix's BDB-frontier advantage is Heritrix-specific — it pipelines
+   politeness waits across hosts rather than bypassing them.
 
 ## Open questions (for Chris)
 

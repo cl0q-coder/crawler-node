@@ -15,6 +15,7 @@
 package fixture
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
@@ -126,6 +127,18 @@ func pageHTML(i, size int) string {
 // Start brings up the fixture serving N sites with a fixed per-response
 // latency. The returned Server must be Closed by the caller.
 func Start(n int, latency time.Duration) (*Server, error) {
+	return start(n, latency, nil)
+}
+
+// StartWithCert is like Start but serves TLS with the provided certificate
+// instead of httptest's generated one. Added for #274 phase 3 so external
+// comparison crawlers (Heritrix, Scrapy, …) can validate the fixture TLS
+// chain against a CA whose SANs cover the bench{i}.test hostnames.
+func StartWithCert(n int, latency time.Duration, cert tls.Certificate) (*Server, error) {
+	return start(n, latency, &cert)
+}
+
+func start(n int, latency time.Duration, cert *tls.Certificate) (*Server, error) {
 	ln, err := net.Listen("tcp", "0.0.0.0:0")
 	if err != nil {
 		return nil, fmt.Errorf("fixture listen: %w", err)
@@ -161,6 +174,9 @@ func Start(n int, latency time.Duration) (*Server, error) {
 		http.NotFound(w, r)
 	}))
 	s.srv.Listener = ln
+	if cert != nil {
+		s.srv.TLS = &tls.Config{Certificates: []tls.Certificate{*cert}}
+	}
 	s.srv.StartTLS()
 	return s, nil
 }

@@ -6,12 +6,19 @@ fetch goes through the downloader first, then the page — with DOWNLOAD_DELAY=1
 and CONCURRENT_REQUESTS_PER_DOMAIN=1 the page lands >=1s after robots, which
 is the binding constraint measured for crawler-node's faithful run.
 """
+import json
+import time
+
 import scrapy
 from scrapy import signals
 
 
 class BenchSpider(scrapy.Spider):
     name = "bench274"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.bytes_total = 0
 
     @classmethod
     def from_crawler(cls, crawler, *args, **kwargs):
@@ -24,6 +31,16 @@ class BenchSpider(scrapy.Spider):
         for m in mw:
             if type(m).__name__ == "GapMiddleware" and hasattr(m, "spider_closed"):
                 m.spider_closed(spider)
+        # Machine-readable result summary for the #274 comparison table.
+        stats = self.crawler.stats.get_stats()
+        with open("/tmp/274-scrapy-stats.json", "w") as f:
+            json.dump({
+                "pages_ok": stats.get("bench274/pages_ok", 0),
+                "pages_err": stats.get("bench274/pages_err", 0),
+                "bytes": self.bytes_total,
+                "elapsed_s": stats.get("elapsed_time_seconds", 0),
+                "finished_at": time.time(),
+            }, f)
 
     async def start(self):
         # Scrapy >= 2.13 entry point (start_requests is no longer consulted).
@@ -41,7 +58,7 @@ class BenchSpider(scrapy.Spider):
         assert response.status == 200, response.url
         assert b"<title>" in response.body, response.url
         self.crawler.stats.inc_value("bench274/pages_ok")
-        self.crawler.stats.add_value("bench274/bytes", len(response.body))
+        self.bytes_total += len(response.body)
 
     def err(self, failure):
         self.crawler.stats.inc_value("bench274/pages_err")

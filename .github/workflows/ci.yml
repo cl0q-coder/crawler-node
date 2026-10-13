@@ -42,16 +42,15 @@ jobs:
           POSTGRES_USER: cl0q
           POSTGRES_PASSWORD: cl0q
           POSTGRES_DB: cl0q
-        # No host port mapping: the job reaches the service by name (works on
-        # both GitHub and a container-based self-hosted runner, and avoids a
-        # host :5432 conflict with other containers on a shared box).
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd "pg_isready -U cl0q -d cl0q" --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - name: install postgresql-client
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
-      - run: psql "postgres://cl0q:cl0q@postgres:5432/cl0q" -v ON_ERROR_STOP=1 -f initdb/01-schema.sql
+      - run: psql "postgres://cl0q:cl0q@localhost:5432/cl0q" -v ON_ERROR_STOP=1 -f initdb/01-schema.sql
 
   # N1: Vendored-copy drift guard. Fails if botid/netguard/robotstxt
   # differ from the pinned commits in vendor-pins.txt.

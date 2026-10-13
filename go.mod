@@ -1,6 +1,6 @@
 module cl0q
 
-go 1.26.0
+go 1.26.9
 
 require (
 	github.com/jimsmart/grobotstxt v1.0.3

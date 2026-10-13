@@ -53,14 +53,22 @@ after robots, per-host serialization) so the comparison is apples-to-apples.
 | Colly (sticky workers) | **15.79** | 996ms | 77MB | 2.0s | robots→1s→page per host, 16 sync workers |
 | Scrapy (DOWNLOAD_DELAY=1) | **14.99** | ≥1s dispatch (slot mechanics) | 163MB | 12.8s | per-hostname slots, ROBOTSTXT_OBEY |
 | Heritrix 3.18.0 | **22.14** (30.8 crawl-phase; wall incl. ~8s JVM startup) | 1.031s | 544MB | 48.6s | 16 toe threads, minDelayMs=1000, 0 failures |
-| Nutch | — | — | — | — | not yet run |
-| StormCrawler | — | — | — | — | not yet run |
+| Nutch 1.23 | **34.00** (41.3 fetch-phase; wall incl. ~5s JVM startup) | 0.049s | 564MB | 29.9s | 16 threads, server.delay=1.0s set but non-binding (inline robots) |
+| StormCrawler 2.11 (Storm 2.6.0) | **19.13** (24.9 crawl-phase; wall incl. ~4s topology submit) | 0.003s | 867MB | 53.1s | 16 fetcher bolts, fetcher.server.delay=1.0 set but non-binding (inline robots) |
 
-**Key finding:** at the politeness-bound operating point, the three Go/Python
-drivers land within noise of each other — the 1s floor dominates, so client
-efficiency differences don't show. Heritrix's BDB frontier pipelines the
-politeness waits better than the naive 1000×1s/16 bound (its toes stay fed),
-trading ~10× the RSS (544MB vs 77MB/163MB) and a much heavier runtime.
+**Key finding (updated, all 7 legs):** at the politeness-bound operating
+point, the drivers that honor the 1s robots→page floor land in the 15–22
+pages/s band — the floor dominates, so client efficiency differences don't
+show. Heritrix's BDB frontier pipelines the politeness waits better than
+the naive 1000×1s/16 bound (its toes stay fed), trading ~10× the RSS and a
+much heavier runtime. Nutch (34.00 pages/s) and StormCrawler (19.13
+pages/s) look faster only because their `fetcher.server.delay` gates
+**queued** per-host fetches while robots.txt is fetched **inline in the
+fetcher thread** — at 1 page/host no queue ever holds two items, so the
+configured 1s floor never binds (999/1000 gaps < 1s for both; min 0.049s
+Nutch, 0.003s StormCrawler — verified in both codebases' 1.x/2.11 sources).
+At equal politeness they'd sit in the same band. StormCrawler is also the
+heaviest leg measured: 867MB peak RSS for the same 1000 pages.
 
 Harness bugs caught along the way (documented so they don't bite again):
 Colly `LimitRule` matches `URL.Host` *with port* (bare `bench*.test` glob
@@ -86,6 +94,8 @@ go test -run 'TestBaseline274$|TestBaseline274Faithful$' -v -timeout 30m \
 go run ./tools/274-comparison/colly/main.go
 cd tools/274-comparison/scrapy && scrapy crawl bench
 # heritrix: see tools/274-comparison/heritrix/README.md
+# nutch: see tools/274-comparison/nutch/README.md
+# stormcrawler: see tools/274-comparison/stormcrawler/README.md
 ```
 
 ## 3. Recommendations

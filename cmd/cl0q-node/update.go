@@ -57,6 +57,11 @@ func runUpdateCommand(args []string) {
 		runUpdateApplyCommand(args[1:])
 		return
 	}
+	// Subcommand: `cl0q-node update status` (Track U rung U4).
+	if len(args) > 0 && args[0] == "status" {
+		runUpdateStatusCommand(args[1:])
+		return
+	}
 
 	fs := flag.NewFlagSet("update", flag.ExitOnError)
 	manifestURL := fs.String("manifest-url", "", "releases.json URL (default: CL0Q_RELEASE_MANIFEST_URL or the provisional U5 URL)")

@@ -1,13 +1,11 @@
 module cl0q
 
-go 1.25.0
-
-toolchain go1.25.14
+go 1.26.0
 
 require (
 	github.com/jimsmart/grobotstxt v1.0.3
 	github.com/lib/pq v1.12.3
-	golang.org/x/net v0.58.0
+	golang.org/x/net v0.60.0
 )
 
-require golang.org/x/text v0.41.0 // indirect
+require golang.org/x/text v0.42.0 // indirect

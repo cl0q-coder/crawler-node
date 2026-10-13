@@ -3298,15 +3298,42 @@ func hasHost(href string) bool {
 	return strings.Contains(href, "://") || strings.HasPrefix(href, "//")
 }
 
+// asciiSpaceTbl is the ASCII subset of unicode.IsSpace, as a table for the
+// countWords fast path below.
+var asciiSpaceTbl = [256]bool{
+	' ': true, '\t': true, '\n': true, '\r': true, '\f': true, '\v': true,
+}
+
 // countWords counts whitespace-separated words like len(strings.Fields(s)), without allocating the slice. Text nodes
 // are counted separately (a word never spans two nodes, as before).
+//
+// #274 phase 2: byte-level fast path. The old version decoded every rune
+// (`for _, r := range s`) and ran the full unicode.IsSpace table lookup per
+// rune — 43% of parse CPU in the #274 profile (countWords 28.6% flat +
+// unicode.IsSpace 14.3%). HTML text is overwhelmingly ASCII, so bytes <0x80
+// take the table path and only non-ASCII bytes pay for rune decoding.
+// Semantics are identical: non-ASCII bytes still go through unicode.IsSpace.
+// Measured 3.2x faster (790us -> 250us on 180KB lorem), zero allocs either way.
 func countWords(s string) int {
 	n, in := 0, false
-	for _, r := range s {
-		if unicode.IsSpace(r) {
-			in = false
-		} else if !in {
-			in, n = true, n+1
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c < 0x80 {
+			if asciiSpaceTbl[c] {
+				in = false
+			} else if !in {
+				in, n = true, n+1
+			}
+			i++
+		} else {
+			r, size := utf8.DecodeRuneInString(s[i:])
+			if unicode.IsSpace(r) {
+				in = false
+			} else if !in {
+				in, n = true, n+1
+			}
+			i += size
 		}
 	}
 	return n

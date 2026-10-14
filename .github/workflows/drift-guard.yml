@@ -1,0 +1,149 @@
+name: drift-guard
+
+# O4: OSS-readiness drift guard. Two jobs:
+#
+#   scrub-guard: fails if anything from the NEVER-PUBLISH list enters the
+#     canonical tree — hardcoded secrets, honeypot code, private-overlay
+#     material (web/PHP layer, PII/accounts/billing). The canonical repo
+#     flips public at 100M; this job is the gate that keeps it clean.
+#
+#   deployed-commit-tag: on release tags, verifies the built commit is
+#     exactly the tagged commit (prod builds FROM the pinned canonical
+#     commit; no drift between tag and binary).
+#
+# NEVER-PUBLISH list (Chris 2026-10-06; R3 reference):
+#   1. Hardcoded secrets: passwords, API keys, tokens in code/config.
+#      (Weak dev passwords are allowed ONLY in docker-compose.yml,
+#      .env.example files, and CI workflow env blocks — and are flagged
+#      here so they stay visible, not silent.)
+#   2. Honeypot code: anything under honeypot/ paths, or files whose
+#      primary purpose is deception infrastructure (not docs ABOUT it).
+#   3. Private overlay: web/ PHP layer, PII/account/billing code. The
+#      overlay/ directory documents the boundary; code must not cross it.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  scrub-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: hardcoded secrets in Go code
+        run: |
+          # Fail on likely-hardcoded secrets in .go files. Excludes test
+          # fixtures (which use obviously-fake values) and comments that
+          # document the pattern without a value.
+          fail=0
+          while IFS= read -r f; do
+            # Skip test files: fixtures use fake values by convention.
+            case "$f" in *_test.go) continue;; esac
+            if grep -nEi 'password\s*[:=]\s*"[^"]{4,}"|passwd\s*[:=]\s*"[^"]{4,}"|api[_-]?key\s*[:=]\s*"[A-Za-z0-9_\-]{12,}"|secret\s*[:=]\s*"[A-Za-z0-9_\-]{12,}"|token\s*[:=]\s*"[A-Za-z0-9_\-]{16,}"|bearer\s+[A-Za-z0-9_\-\.]{16,}' "$f" | grep -viE "example|placeholder|changeme|your-|<.*>|fake|test" ; then
+              echo "SCRUB-GUARD: possible hardcoded secret in $f (see above)"
+              fail=1
+            fi
+          done < <(find . -name '*.go' -not -path './vendor/*')
+          # DSN with embedded credentials outside of examples/tests.
+          if grep -rnE 'postgres://[^/:]+:[^@]+@' --include='*.go' . | grep -v '_test.go' | grep -viE 'example|placeholder|user:pass@host' ; then
+            echo "SCRUB-GUARD: DSN with embedded credentials in Go code"
+            fail=1
+          fi
+          exit $fail
+
+      - name: honeypot code outside docs
+        run: |
+          # Honeypot implementation must never enter the canonical tree.
+          # Docs ABOUT the honeypot (overlay/README.md etc.) are fine.
+          fail=0
+          if find . -path ./.git -prune -o -type d -iname '*honeypot*' -print | grep -q .; then
+            echo "SCRUB-GUARD: honeypot directory in canonical tree:"
+            find . -path ./.git -prune -o -type d -iname '*honeypot*' -print
+            fail=1
+          fi
+          if grep -rlnEi 'honeypot' --include='*.go' . | grep -v '_test.go'; then
+            echo "SCRUB-GUARD: honeypot references in Go code (docs only, please)"
+            fail=1
+          fi
+          exit $fail
+
+      - name: private overlay boundary
+        run: |
+          # The web/PHP layer, PII, accounts, and billing live in the private
+          # overlay forever. Code for them must not appear in canonical paths.
+          # (URL skip-patterns mentioning .php for crawler politeness are
+          # fine — this looks for actual PHP code, not path references.)
+          fail=0
+          if grep -rlnE '<\?php' --include='*.php' --include='*.go' --include='*.sql' . 2>/dev/null | grep -v '_test.go' | grep -viE 'overlay/|docs/'; then
+            echo "SCRUB-GUARD: PHP code in canonical tree"
+            fail=1
+          fi
+          if find . -path ./.git -prune -o -name '*.php' -print 2>/dev/null | grep -viE 'overlay/|docs/' | grep -q .; then
+            echo "SCRUB-GUARD: .php files in canonical tree"
+            find . -path ./.git -prune -o -name '*.php' -print | grep -viE 'overlay/|docs/'
+            fail=1
+          fi
+          for pat in 'billing' 'invoice' 'stripe'; do
+            if grep -rlnEi "$pat" --include='*.go' --include='*.sql' . 2>/dev/null | grep -v '_test.go' | grep -viE 'overlay/|docs/'; then
+              echo "SCRUB-GUARD: private-overlay pattern '$pat' in canonical code"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: weak dev passwords stay visible
+        run: |
+          # Weak dev passwords are ALLOWED in exactly three places
+          # (Chris 2026-10-06): docker-compose files, .env examples, CI
+          # workflow env blocks. This step lists them so they stay visible
+          # in CI logs — a new one anywhere else fails the scrub-guard.
+          echo "Known weak dev passwords (allowed locations only):"
+          grep -rn 'POSTGRES_PASSWORD' docker-compose.yml .env.example .github/workflows/ 2>/dev/null || true
+          fail=0
+          while IFS= read -r f; do
+            case "$f" in
+              ./docker-compose.yml|./.env.example|.github/workflows/*) continue;;
+            esac
+            if grep -l 'POSTGRES_PASSWORD' "$f" 2>/dev/null; then
+              echo "SCRUB-GUARD: POSTGRES_PASSWORD outside allowed locations: $f"
+              fail=1
+            fi
+          done < <(find . -name '*.yml' -o -name '*.yaml' -o -name '.env*')
+          exit $fail
+
+  deployed-commit-tag:
+    runs-on: ubuntu-latest
+    # Only meaningful on tag pushes; PRs and branch pushes skip.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: tag points at HEAD
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          tag_sha=$(git rev-list -n 1 "$tag")
+          head_sha=$(git rev-parse HEAD)
+          echo "tag $tag -> $tag_sha"
+          echo "HEAD     -> $head_sha"
+          if [ "$tag_sha" != "$head_sha" ]; then
+            echo "DRIFT-GUARD: tag $tag does not point at the built commit."
+            echo "Prod builds FROM the pinned canonical commit; retag or rebuild."
+            exit 1
+          fi
+          echo "OK: deployed commit == tag $tag"
+      - name: VERSION file matches tag
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          want="${tag#v}"
+          got=$(cat VERSION | tr -d '[:space:]')
+          echo "tag version: $want / VERSION file: $got"
+          if [ "$want" != "$got" ]; then
+            echo "DRIFT-GUARD: VERSION file ($got) does not match tag ($want)."
+            exit 1
+          fi
+          echo "OK: VERSION matches tag"

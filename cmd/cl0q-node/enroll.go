@@ -1,6 +1,6 @@
 // Enrol client — implements PROTOCOL.md §1 (open enrol, model A).
 //
-//	Usage: cl0q-node enroll [--contact you@example.com] [--out path]
+//	Usage: cl0q-node enroll [--contact you@example.com] [--label "My Server"] [--out path]
 //
 // POSTs to {INGEST_URL}/api/nodes/enroll, stores the returned node_id +
 // token + refresh_secret as JSON at the credentials path with mode 0600,
@@ -28,6 +28,7 @@ import (
 type enrollRequest struct {
 	Version         string `json:"version"`
 	OperatorContact string `json:"operator_contact,omitempty"`
+	OperatorLabel   string `json:"operator_label,omitempty"` // human-friendly node name, e.g. "UK Home Server"
 	NodeID          string `json:"node_id,omitempty"`        // set on re-enrol (rotation)
 	RefreshSecret   string `json:"refresh_secret,omitempty"` // required with NodeID on re-enrol
 }
@@ -41,7 +42,36 @@ type enrollResponse struct {
 	// PowChallenge, when present, is a G-12 proof-of-work Sybil gate: the
 	// client must solve it and confirm before credentials are trusted.
 	// Absent = server doesn't require PoW; enrollment proceeds unchanged.
-	PowChallenge *trust.Challenge `json:"pow_challenge,omitempty"`
+	PowChallenge  *trust.Challenge `json:"pow_challenge,omitempty"`
+	OperatorLabel string           `json:"operator_label,omitempty"` // server-echoed label
+	// Graduation criteria, when the server provides them. If absent, the
+	// client falls back to the documented defaults (see graduationText).
+	// Added so HE-1 can tune quarantine without a client release.
+	GraduationVerifiedSubmissions *int `json:"graduation_verified_submissions,omitempty"`
+	GraduationCleanDays           *int `json:"graduation_clean_days,omitempty"`
+}
+
+// graduationText renders the quarantine graduation criteria, preferring
+// server-provided values over the hardcoded defaults.
+func graduationText(resp *enrollResponse) string {
+	subs, days := 1000, 3
+	if resp.GraduationVerifiedSubmissions != nil {
+		subs = *resp.GraduationVerifiedSubmissions
+	}
+	if resp.GraduationCleanDays != nil {
+		days = *resp.GraduationCleanDays
+	}
+	return fmt.Sprintf("Graduation is automatic: %s verified submissions + %d clean days. Nothing to do but crawl.",
+		formatInt(subs), days)
+}
+
+func formatInt(n int) string {
+	s := fmt.Sprintf("%d", n)
+	// Add thousands separators for readability.
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 // nodeCredentials is what lives in the credentials file (0600). The
@@ -51,6 +81,7 @@ type nodeCredentials struct {
 	NodeID        string `json:"node_id"`
 	Token         string `json:"token"`
 	RefreshSecret string `json:"refresh_secret,omitempty"`
+	OperatorLabel string `json:"operator_label,omitempty"`
 }
 
 // credentialsPath is where enrol stores node_id + token.
@@ -117,6 +148,7 @@ func writeCredentials(path string, creds nodeCredentials) error {
 func runEnrollCommand(args []string) {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	contact := fs.String("contact", "", "operator contact email (optional, recommended — how cl0q reaches you about abuse reports)")
+	label := fs.String("label", "", "human-friendly operator label for this node, e.g. \"UK Home Server\" (optional — shown in status output and the admin view)")
 	out := fs.String("out", credentialsPath(), "where to store node_id + token (mode 0600)")
 	fs.Parse(args)
 
@@ -130,7 +162,7 @@ func runEnrollCommand(args []string) {
 		fmt.Fprintln(os.Stderr, "enroll:", err)
 		os.Exit(2)
 	}
-	if err := doEnroll(ingestURL, *contact, *out); err != nil {
+	if err := doEnroll(ingestURL, *contact, *label, *out); err != nil {
 		fmt.Fprintln(os.Stderr, "enroll:", err)
 		os.Exit(1)
 	}
@@ -150,7 +182,7 @@ var enrollClient = &http.Client{
 // doEnroll performs the enrol handshake and stores the credentials.
 // The token and refresh_secret are never printed or logged. Returns nil
 // on success.
-func doEnroll(ingestURL, contact, out string) error {
+func doEnroll(ingestURL, contact, label, out string) error {
 	// Re-enrol (rotation) if we already have credentials: send node_id +
 	// refresh_secret. A credential file from before refresh_secret existed
 	// cannot authenticate rotation — fall back to a fresh enrol rather
@@ -166,6 +198,7 @@ func doEnroll(ingestURL, contact, out string) error {
 	reqBody, _ := json.Marshal(enrollRequest{
 		Version:         botid.Product + "/" + botid.Version,
 		OperatorContact: contact,
+		OperatorLabel:   label,
 		NodeID:          reCreds.NodeID,
 		RefreshSecret:   reCreds.RefreshSecret,
 	})
@@ -218,16 +251,36 @@ func doEnroll(ingestURL, contact, out string) error {
 		NodeID:        er.NodeID,
 		Token:         er.Token,
 		RefreshSecret: er.RefreshSecret,
+		OperatorLabel: er.OperatorLabel,
 	}); err != nil {
 		return err
 	}
 	// The token and refresh_secret are NEVER printed.
-	quarantine := "quarantined (submissions are spot-verified before reaching the live index)"
-	if !er.Quarantined {
-		quarantine = "trusted"
+	// GAP-3: the operator gets an explicit confirmation — what happened,
+	// what quarantine means, and how to verify the node is actually
+	// crawling. The UK-node double-enroll happened because none of this
+	// was said out loud.
+	displayLabel := er.OperatorLabel
+	if displayLabel == "" {
+		displayLabel = label
 	}
-	fmt.Printf("enrolled as node %s — %s\ncredentials stored at %s (mode 0600)\nnext: set CL0Q_NODE_ID=%s (or it is read from the credentials file) and run preflight\n",
-		er.NodeID, quarantine, out, er.NodeID)
+	header := fmt.Sprintf("enrolled as node %s", er.NodeID)
+	if displayLabel != "" {
+		header += fmt.Sprintf(" (%s)", displayLabel)
+	}
+	fmt.Println(header)
+	fmt.Printf("credentials stored at %s (mode 0600)\n", out)
+	if er.Quarantined {
+		fmt.Println("status: QUARANTINED — this is normal for a new node.")
+		fmt.Println("  Your submissions are spot-verified before reaching the live index.")
+		fmt.Println("  " + graduationText(&er))
+	} else {
+		fmt.Println("status: trusted.")
+	}
+	fmt.Println("confirm you're crawling:")
+	fmt.Println("  1. cl0q-node preflight   — ingest reachability + token validity")
+	fmt.Println("  2. start the node, then: cl0q-node status")
+	fmt.Println("  3. watch node_rows_forwarded_total climb; flat for >2 cycles means stuck")
 	return nil
 }
 

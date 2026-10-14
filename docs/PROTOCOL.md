@@ -22,12 +22,21 @@ Request (JSON):
 ```json
 {
   "version": "cl0q-node/1.0",
-  "operator_contact": "operator@example.com"
+  "operator_contact": "operator@example.com",
+  "operator_label": "UK Home Server"
 }
 ```
 
 `operator_contact` is optional but recommended — it is how cl0q reaches the
-operator about abuse reports or revocation.
+operator about abuse reports or revocation. `operator_label` is optional — a
+human-friendly name for the node, shown in the admin view and echoed back in
+the response.
+
+The server records the enrolling source IP (from `X-Real-IP`, which the
+fronting proxy sets) into the node row alongside the contact and label.
+Tokens are bound to the enrolment network: a request from a different
+source IP gets `403` with a revocation flag (see §2) — the operator
+re-enrols from the node's real address.
 
 Response `200 OK` (JSON):
 
@@ -37,9 +46,23 @@ Response `200 OK` (JSON):
   "token": "<secret, shown once>",
   "refresh_secret": "<secret, shown once>",
   "ingest_url": "https://cl0q.com",
-  "quarantined": true
+  "quarantined": true,
+  "operator_label": "UK Home Server"
 }
 ```
+
+Optional: the server may include the quarantine graduation criteria so the
+client doesn't hardcode them:
+
+```json
+{
+  "graduation_verified_submissions": 1000,
+  "graduation_clean_days": 3
+}
+```
+
+If absent, the client uses the documented defaults (1,000 verified
+submissions + 3 clean days).
 
 - The node stores `node_id`, `token`, and `refresh_secret` in its config file
   with mode `0600` and **never logs them** (not even at debug level). Both
@@ -67,12 +90,12 @@ Authorization: Bearer <token>
 
 - The HTTP client **never follows redirects** — a redirect response is
   surfaced as an error, so the token only ever goes to `ingest_url`.
-- The server checks the token (it stores only the SHA-256 hash). Open-enrolled
-  nodes are **token-only**: they authenticate from any source IP, so a dynamic
-  or rotating egress IP is fine — it does not trip anything. (cl0q can
-  optionally pin a specific node to a source-IP CIDR; such a node receives
-  `403` from an off-allowlist address. This is not the default and is never set
-  by open enrol.) Quarantine (§3) is the trust mechanism, not the source IP.
+- The server checks the token (it stores only the SHA-256 hash). Tokens are
+  bound to the enrolment source IP (see §1): a request from a different IP
+  gets `403`. If the node's egress IP changes (dynamic ISP, new host),
+  re-enrol from the new address — do not keep retrying with the old token.
+  Quarantine (§3) remains the trust mechanism for *what* a node submits;
+  the IP binding is the mechanism for *who* may submit as that node.
 
 ## 3. Trust states
 

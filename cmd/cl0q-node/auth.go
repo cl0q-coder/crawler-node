@@ -140,7 +140,13 @@ func (ts *tokenSource) handleAuthFailure(status int, body string) (retry bool) {
 		return fail("HTTP 401 (token expired/invalid) — token came from NODE_TOKEN env, cannot rotate automatically. Update NODE_TOKEN or run `cl0q-node enroll`, then restart")
 	}
 	ts.mu.Unlock()
-	err := doEnroll(ts.ingestURL, "", ts.credPath)
+	// Preserve the operator label across rotation (read it before re-enrol
+	// rewrites the file).
+	keepLabel := ""
+	if rc, rerr := loadCredentialsFrom(ts.credPath); rerr == nil {
+		keepLabel = rc.OperatorLabel
+	}
+	err := doEnroll(ts.ingestURL, "", keepLabel, ts.credPath)
 	ts.mu.Lock()
 	if err != nil {
 		return fail("HTTP 401 — automatic re-enrol failed: " + err.Error())

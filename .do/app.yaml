@@ -1,0 +1,164 @@
+# cl0q crawler node — DigitalOcean App Platform spec.
+#
+# Maps the docker-compose stack to App Platform components:
+#   db (Postgres)      -> managed/dev database "crawlerdb"
+#   domain-crawler     -> worker
+#   website-crawler    -> worker
+#   dns-enricher       -> worker
+#   asn-enricher       -> worker
+#   node (ingest)      -> worker
+#
+# BEFORE DEPLOYING, read .do/README.md: one-time schema load, secrets,
+# and turning OFF Autodeploy on every component (a push restarting all
+# crawlers mid-crawl is the App Platform version of the disk-full death).
+#
+# Cost estimate: ~$25/mo (5x basic workers) + dev database (free).
+# A production managed Postgres adds ~$15/mo on top.
+
+spec:
+  name: cl0q-crawler-node
+  region: lon
+
+  # Shared env for the four crawl-pipeline workers.
+  workers:
+  - name: domain-crawler
+    github:
+      repo: cl0q-coder/crawler-node
+      branch: main
+    dockerfile_path: Dockerfile
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+    run_command: /usr/local/bin/domain-crawler
+    envs:
+    - key: DATABASE_URL
+      scope: RUN_TIME
+      value: ${crawlerdb.DATABASE_URL}
+    - key: CL0Q_NODE_ID
+      scope: RUN_TIME
+      value: nd_996e7290
+    - key: SEEDS_FILE
+      scope: RUN_TIME
+      value: /app/seeds.txt
+    - key: NODE_MAX_DB_GB
+      scope: RUN_TIME
+      value: "4"
+    - key: NODE_MAX_DOMAINS
+      scope: RUN_TIME
+      value: "1000000"
+    - key: NODE_MAX_PAGES
+      scope: RUN_TIME
+      value: "1000000"
+
+  - name: website-crawler
+    github:
+      repo: cl0q-coder/crawler-node
+      branch: main
+    dockerfile_path: Dockerfile
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+    run_command: /usr/local/bin/website-crawler
+    envs:
+    - key: DATABASE_URL
+      scope: RUN_TIME
+      value: ${crawlerdb.DATABASE_URL}
+    - key: CL0Q_NODE_ID
+      scope: RUN_TIME
+      value: nd_996e7290
+    - key: LOOP
+      scope: RUN_TIME
+      value: "1"
+    - key: USE_CRAWL_STATE
+      scope: RUN_TIME
+      value: "1"
+    - key: WORKERS
+      scope: RUN_TIME
+      value: "8"
+    - key: RECRAWL_DAYS
+      scope: RUN_TIME
+      value: "120"
+    - key: NODE_MAX_DB_GB
+      scope: RUN_TIME
+      value: "4"
+    - key: NODE_MAX_DOMAINS
+      scope: RUN_TIME
+      value: "1000000"
+    - key: NODE_MAX_PAGES
+      scope: RUN_TIME
+      value: "1000000"
+
+  - name: dns-enricher
+    github:
+      repo: cl0q-coder/crawler-node
+      branch: main
+    dockerfile_path: Dockerfile
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+    run_command: /usr/local/bin/dns-enricher
+    envs:
+    - key: DATABASE_URL
+      scope: RUN_TIME
+      value: ${crawlerdb.DATABASE_URL}
+    - key: CL0Q_NODE_ID
+      scope: RUN_TIME
+      value: nd_996e7290
+    - key: LOOP
+      scope: RUN_TIME
+      value: "1"
+    - key: NODE_MAX_DB_GB
+      scope: RUN_TIME
+      value: "4"
+
+  - name: asn-enricher
+    github:
+      repo: cl0q-coder/crawler-node
+      branch: main
+    dockerfile_path: Dockerfile
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+    run_command: /usr/local/bin/asn-enricher
+    envs:
+    - key: DATABASE_URL
+      scope: RUN_TIME
+      value: ${crawlerdb.DATABASE_URL}
+    - key: CL0Q_NODE_ID
+      scope: RUN_TIME
+      value: nd_996e7290
+    - key: LOOP
+      scope: RUN_TIME
+      value: "1"
+    - key: IPINFO_TOKEN
+      scope: RUN_TIME
+      type: SECRET
+      value: ""
+    - key: NODE_MAX_DB_GB
+      scope: RUN_TIME
+      value: "4"
+
+  # Forwards new rows to cl0q's ingest API. Same binary/flags as compose.
+  - name: node
+    github:
+      repo: cl0q-coder/crawler-node
+      branch: main
+    dockerfile_path: Dockerfile
+    instance_size_slug: apps-s-1vcpu-0.5gb
+    instance_count: 1
+    run_command: /usr/local/bin/cl0q-node -interval 60s -batch 100
+    envs:
+    - key: LOCAL_DATABASE_URL
+      scope: RUN_TIME
+      value: ${crawlerdb.DATABASE_URL}
+    - key: CL0Q_NODE_ID
+      scope: RUN_TIME
+      value: nd_996e7290
+    - key: INGEST_URL
+      scope: RUN_TIME
+      value: https://cl0q.com
+    - key: NODE_TOKEN
+      scope: RUN_TIME
+      type: SECRET
+      value: ""
+
+  databases:
+  - name: crawlerdb
+    engine: PG
+    production: false

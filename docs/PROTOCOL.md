@@ -247,3 +247,92 @@ human release notes, and any egress/permission/privacy change BEFORE any
 binary is downloaded. Download + apply happens only on explicit operator
 agreement, with SHA-256 + signature verification of the artifact, atomic
 swap, health check, and auto-rollback (rungs U2–U4).
+
+## 8. Protocol v2 — distributed crawl coordination (HE-1, issue #135)
+
+Additive to v1 (§6 still holds: ignore-unknown-fields both directions).
+Nodes advertise `protocol_version: 2` in enrol + heartbeat; v1 nodes keep
+working standalone. Client: `internal/he1` (crawler-node). Agreed with
+Claude 2026-10-12; build order is simulation-first against a fake central,
+minimal real central later (server side).
+
+Shard model: the domain space is split into uint16 shards by registrable
+domain (one shard per site, so per-host politeness still works). The
+central deals shards to live nodes and is the SOLE writer of lease state.
+
+### 8.1 Heartbeat — `POST /api/nodes/heartbeat` (every 30s, node-token auth)
+
+Request:
+
+```json
+{
+  "node_id": "nd_7f3a9c",
+  "protocol_version": 2,
+  "shards_held": [3, 7],
+  "in_flight_count": 42,
+  "lease_renewals": ["lease-000123"],
+  "metrics": {"pages_last_30s": 900, "p99_crawl_ms": 850, "errors_last_30s": 2, "version": "cl0q-node/1.0"}
+}
+```
+
+Response:
+
+```json
+{
+  "shards_assigned": [3, 7, 9],
+  "lease_renewed_until": {"lease-000123": "2026-10-12T12:34:56Z"},
+  "config": {"min_host_gap_ms": 2000, "max_pages_per_host_cycle": 25, "recrawl_days": 7, "heartbeat_interval_s": 30},
+  "membership_epoch": 14
+}
+```
+
+Semantics:
+
+- **Dead detection**: 3 missed beats (90s) = dead → shards reassigned,
+  leases expire un-renewed.
+- **`config` floors are one-directional**: the node applies a pushed floor
+  ONLY if it is stricter than its local floor (larger min_host_gap,
+  smaller max_pages_per_host_cycle, longer recrawl window), and once a
+  floor is relaxed it never re-tightens. The server can relax fleet floors
+  but can never push a node past its operator's own politeness.
+  `heartbeat_interval_s` is authoritative (the node must match the
+  server's dead-detection cadence to stay alive).
+- **`membership_epoch` bumps on every ring change** (join/leave/death) →
+  the node re-filters its draw to the new assignment immediately.
+
+### 8.2 Claim — `POST /api/frontier/claim` (node-token auth)
+
+Request: `{"node_id": "nd_7f3a9c", "count": 500, "shards": [3, 7, 9]}`
+(central caps count at 2000). Response:
+
+```json
+{
+  "lease_id": "lease-000124",
+  "lease_until": "2026-10-12T12:40:00Z",
+  "domains": [{"id": "dom-000001", "domain": "example.com", "shard": 3}]
+}
+```
+
+Semantics:
+
+- Claimable = discovered ∧ not crawled within the recrawl window ∧ not
+  under an unexpired lease. The central grants only from shards the node
+  holds.
+- **`lease_until` = 2× the node's p99 ingest-batch latency, floored at
+  5min, capped at 30min** (10min default on the first claim, pre-p99).
+- **Ingest via the existing `/api/ingest` IMPLICITLY releases the lease**
+  for the ingested domains — no separate call needed.
+- Heartbeat renews in-flight leases (`lease_renewed_until`).
+- Node death → leases expire un-renewed → reclaimable within one window.
+  No-double-crawl and no-domain-lost fall out of the one lease mechanism.
+
+### 8.3 Release — `POST /api/frontier/release` (optional, low priority)
+
+`{"node_id": "nd_7f3a9c", "domain_ids": ["dom-000002"]}` — skip-decided
+domains the node won't crawl. Optional; ingest already releases.
+
+### Not changed by v2
+
+Politeness floors (only ever tightened node-side per §8.1, never loosened
+past local), the trust/quarantine path (§3), and the ingest wire (§4) —
+v2 is additive only.

@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+colly274
+nutch/fixturelog/fixturelog
+stormcrawler/target/

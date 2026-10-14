@@ -1,0 +1,177 @@
+[
+  {
+    "brand_name": "Adobe",
+    "domain": "adobe.com",
+    "sha256": "5eed69e764f1d40b943a19b4b36aca72519b2626dd519891173d7728a74d821c",
+    "ahash": "00183c3c6666ff00",
+    "source": "brand homepage adobe.com (https://adobe.com/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Airbnb",
+    "domain": "airbnb.com",
+    "sha256": "34ef20800623f6f8e5e0d0c99445d756a3e58863843e72268aed19f98f98a91c",
+    "ahash": "0018243c5a5a7e00",
+    "source": "brand homepage airbnb.com (https://a0.muscache.com/airbnb/static/icons/apple-touch-icon-76x76-3b313d93b1b5823293524b9764352ac9.png), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Amazon",
+    "domain": "amazon.com",
+    "sha256": "5866636f18764cd66366ae6eb682e972b4eae1771512cd76b304b6dd3c0f1d2d",
+    "ahash": "000000c37f000000",
+    "source": "brand homepage amazon.com (https://amazon.com/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Best Buy",
+    "domain": "bestbuy.com",
+    "sha256": "7d86ee1903eefb1fdccab3b4d20010ba0c40978b776e5d3bef99bf568d37c550",
+    "ahash": "003f7fffff7f0000",
+    "source": "brand homepage bestbuy.com (https://bestbuy.com/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Chase",
+    "domain": "chase.com",
+    "sha256": "a63194678ca018fb3963ca5b7d0381d7bf308de7170ff0304179f4aba8b346fd",
+    "ahash": "1c5ec0c3c3037a38",
+    "source": "brand homepage chase.com (https://www.chase.com/etc/designs/chase-ux/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Dropbox",
+    "domain": "dropbox.com",
+    "sha256": "c0906d540d89dbe1f09b24f17b7f35b81350e8d381c1558b075c28ea913c450d",
+    "ahash": "00247e247e3c1800",
+    "source": "brand homepage dropbox.com (https://cfl.dropboxstatic.com/static/metaserver/static/images/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Facebook",
+    "domain": "facebook.com",
+    "sha256": "8924f44d76426a340b105cbdc5b93678c6b772e847b393f2568d94847c0d8d80",
+    "ahash": "001c1c183c3c1818",
+    "source": "brand homepage facebook.com (https://static.xx.fbcdn.net/rsrc.php/y1/r/ay1hV6OlegS.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Google",
+    "domain": "google.com",
+    "sha256": "6da5620880159634213e197fafca1dde0272153be3e4590818533fab8d040770",
+    "ahash": "3c66dffffddb663c",
+    "source": "brand homepage google.com (https://google.com/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Instagram",
+    "domain": "instagram.com",
+    "sha256": "5ea73220ab5bda046e21d3f0cba26eafadeb3cc2bbd07a91978774048c84b6ee",
+    "ahash": "007e5e667e7afe7c",
+    "source": "brand homepage instagram.com (https://static.cdninstagram.com/rsrc.php/yr/r/rzWiSjZRxk5.webp), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "LinkedIn",
+    "domain": "linkedin.com",
+    "sha256": "0870ae6fab63899e7bd0a0ae5a16c88813cad25f8dee829651de201f5492c99c",
+    "ahash": "",
+    "source": "brand homepage linkedin.com (https://linkedin.com/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Lyft",
+    "domain": "lyft.com",
+    "sha256": "f439d0914343548fb7cecfa5a2f051b63186abf92b73e0705623886aeb7c6098",
+    "ahash": "00868fffffb93000",
+    "source": "brand homepage lyft.com (http://lyft.com/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Microsoft",
+    "domain": "microsoft.com",
+    "sha256": "90cdaf487716184e4034000935c605d1633926d348116d198f355a98b8c6cd21",
+    "ahash": "07070700070f0f0f",
+    "source": "brand homepage microsoft.com (https://microsoft.com/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "PayPal",
+    "domain": "paypal.com",
+    "sha256": "f2eab5e825943dfb6b09fc1fe2202007d0fcc2d8e1f73c18681d97a516df67b7",
+    "ahash": "ffc3c3c1c38fefff",
+    "source": "brand homepage paypal.com (https://www.paypalobjects.com/marketing/web/icons/monogram/pp64.png), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Pinterest",
+    "domain": "pinterest.com",
+    "sha256": "5410764149903d1db37bbd92d37aa6e08ff4c129bd13d7d9e65762312d4da774",
+    "ahash": "003c7e7e7e7e3c00",
+    "source": "brand homepage pinterest.com (https://s.pinimg.com/webapp/logo_transparent_144x144-3da7a67b.png), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Roblox",
+    "domain": "roblox.com",
+    "sha256": "7afe92edde27ce7949b0ebea760d2a009eac696db5686a8efe9c7d17ef590af3",
+    "ahash": "00303e3e7c7c0c00",
+    "source": "brand homepage roblox.com (https://images.rbxcdn.com/905bd722ee0a6ceda3caacde54c0b081.png), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Shopify",
+    "domain": "shopify.com",
+    "sha256": "861d28bcbe8a917186e415206f4e0a733c3f4f6e5e313d7b3bb7f2ad5cc8c6b6",
+    "ahash": "001c7c7e7e7e7e1c",
+    "source": "brand homepage shopify.com (https://cdn.shopify.com/b/shopify-brochure2-assets/61cc781fe73f11e9d4bd160d27cc627b.png), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Snapchat",
+    "domain": "snapchat.com",
+    "sha256": "e43fdb8eb95a0cf5a5027633152640a8df4ab802ad13d498643ed2a4bed21d72",
+    "ahash": "7ec3db99dbbdc37e",
+    "source": "brand homepage snapchat.com (https://static.snapchat.com/images/apple-touch-icon/apple-touch-icon-yellow-180.png), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Spotify",
+    "domain": "spotify.com",
+    "sha256": "b64ecc030dcc47688f94d6c4b14d747f2b8dbcdc7012e5c69574f8354eac7257",
+    "ahash": "3c7e83c5fbf37e3c",
+    "source": "brand homepage spotify.com (https://open.spotifycdn.com/cdn/images/favicon32.b64ecc03.png), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Target",
+    "domain": "target.com",
+    "sha256": "104ea9ad1f1fd3810846327698d84c11ebb447c9cdb66a675421b82a9f3cc339",
+    "ahash": "1c3e62d9ddc9621c",
+    "source": "brand homepage target.com (https://assets.targetimg1.com/static/images/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Telegram",
+    "domain": "telegram.org",
+    "sha256": "181349b08b8da309823b3b6a670ce13581ff82af7b03db71ba60c705d0620261",
+    "ahash": "187e7effff7e7e00",
+    "source": "brand homepage telegram.org (http://telegram.org/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "UPS",
+    "domain": "ups.com",
+    "sha256": "08c35082813f6b3dceca683d4172be9653304cf4d87802c03d0799b25d0867ce",
+    "ahash": "",
+    "source": "brand homepage ups.com (https://ups.com/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "WhatsApp",
+    "domain": "whatsapp.com",
+    "sha256": "1ab6db0cc2eb55d911f151b0aa339c55b6b225efcceddb8ff2050cab1410e347",
+    "ahash": "",
+    "source": "brand homepage whatsapp.com (https://static.whatsapp.net/rsrc.php/y1/r/FJbTMJqMap7.svg), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "X",
+    "domain": "x.com",
+    "sha256": "a83542eb0563242949d7dbde720014fb7ab48ae14ed59f43eec34907cb90c477",
+    "ahash": "00243c381c3c0400",
+    "source": "brand homepage x.com (https://x.com/apple-touch-icon.png), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "YouTube",
+    "domain": "youtube.com",
+    "sha256": "8f713bc9f87f7260c7ed2b40210c6ece088276a3ed0cf6c5181f26df3fb3cc81",
+    "ahash": "003cffffffff3c00",
+    "source": "brand homepage youtube.com (https://www.youtube.com/s/desktop/0a4db377/img/favicon.ico), fetched 2026-10-09"
+  },
+  {
+    "brand_name": "Zoom",
+    "domain": "zoom.us",
+    "sha256": "58b6fee1a883d9b798dea9dbf8f262fb8875e035bfa571792b8967c4c0434d26",
+    "ahash": "1c3e7f7f7e720000",
+    "source": "brand homepage zoom.us (https://st1.zoom.us/homepage/20260930-1234/primary/favicon.ico), fetched 2026-10-09"
+  }
+]

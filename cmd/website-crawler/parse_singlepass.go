@@ -11,8 +11,10 @@ package main
 // token once and allocates ~one small string per tag.
 //
 // Equivalence notes (verified by TestParseSinglePassDifferential):
-//   - Tag dispatch lowercases with strings.ToLower, matching html.Parse's
-//     lowercased n.Data. Attribute keys are compared case-insensitively,
+//   - Tag dispatch lowercases ASCII-only (lowerTagASCII), matching
+//     x/net TagName's ASCII-only lowercasing of n.Data. strings.ToLower
+//     would corrupt invalid UTF-8 bytes to U+FFFD, collapsing distinct
+//     tag names the tree builder treats as different. Attribute keys are compared case-insensitively,
 //     exactly like readMeta and the link/anchor handling in parseHTMLInfo.
 //   - Skipped subtrees (script/style/noscript/template/svg): the DOM walk
 //     returns before visiting children; here a depth counter skips tokens
@@ -49,6 +51,22 @@ import (
 )
 
 // isSkipTag reports the subtrees the DOM walk never descends into.
+// lowerTagASCII lowercases ASCII A-Z bytes, preserving all other bytes
+// exactly. strings.ToLower would replace invalid UTF-8 bytes with U+FFFD,
+// collapsing distinct tag names (e.g. "bod\x90" vs "bod\xe7" both become
+// "bod\uFFFD") — but x/net's TagName lowercases ASCII-only and the tree
+// builder compares the raw bytes, so we must too.
+func lowerTagASCII(b []byte) string {
+	out := make([]byte, len(b))
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		out[i] = c
+	}
+	return string(out)
+}
+
 func isSkipTag(tn string) bool {
 	switch tn {
 	case "script", "style", "noscript", "template", "svg":
@@ -60,6 +78,8 @@ func isSkipTag(tn string) bool {
 // dropNUL matches html.Parse: the tree builder ignores U+0000 character
 // tokens, while html.Tokenizer passes NUL bytes through in text tokens.
 // Strip them so both paths see identical text (found by FuzzParseSinglePass).
+// In foreign content (svg/math) the tree builder substitutes U+FFFD instead
+// — normText handles that case.
 func dropNUL(s string) string {
 	if strings.IndexByte(s, 0) < 0 {
 		return s
@@ -103,28 +123,307 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 	z := html.NewTokenizer(r)
 	var skipTag string // non-empty while inside a skipped subtree
 	skipDepth := 0
-	// title/h1 capture: mirrors textOf's pendingSpace collapse.
-	var capTag string // "title" or "h1" while capturing
-	capDepth := 0
-	var capBuf strings.Builder
-	capPendingSpace := false
-	capFlushSpace := func() {
-		if capPendingSpace && capBuf.Len() > 0 {
-			capBuf.WriteByte(' ')
-		}
-		capPendingSpace = false
+	// title/h1 capture: mirrors textOf's pendingSpace collapse. A stack of
+	// frames (not a single slot) because the DOM walk treats <title> as a
+	// real element even inside <h1> — h1 is not RCDATA, so <h1><title>0 sets
+	// BOTH Title and H1, and the title's text counts toward the h1 too
+	// (textOf includes descendants). Text feeds every open frame.
+	// elemDepth is len(elemStack) just after the frame's element was
+	// pushed; popElemTo drops frames whose element is gone.
+	type capFrame struct {
+		tag          string // "title" or "h1"
+		buf          strings.Builder
+		pendingSpace bool
+		elemDepth    int
 	}
-	flushCap := func() {
-		s := cleanTitle(capBuf.String())
-		if capTag == "title" {
-			if info.Title == "" {
-				info.Title = s
+	var capStack []*capFrame
+	accumFrame := func(fr *capFrame, data string) {
+		accumCap(data, &fr.buf, &fr.pendingSpace, func() {
+			if fr.pendingSpace && fr.buf.Len() > 0 {
+				fr.buf.WriteByte(' ')
 			}
-		} else if info.H1 == "" {
-			info.H1 = s
-		}
-		capTag = ""
+			fr.pendingSpace = false
+		})
 	}
+	// pendingTitle/pendingH1 hold popped inner frames in pre-order. The DOM
+	// walk visits same-tag elements in pre-order and its "first wins" guard
+	// (info.Title/H1 == "") lets a later element overwrite an EMPTY
+	// cleanTitle — e.g. "<h1><<A><h1>0<h1>" yields H1="0" (the outer h1's
+	// textOf is "<0", which cleanTitle truncates to ""). So when the
+	// outermost frame flushes empty, the first non-empty pending candidate
+	// wins; a non-empty outermost flush discards the candidates.
+	var pendingTitle, pendingH1 []*capFrame
+	decisiveFlush := func(fr *capFrame) {
+		s := cleanTitle(fr.buf.String())
+		pend := &pendingH1
+		if fr.tag == "title" {
+			pend = &pendingTitle
+		}
+		if s != "" {
+			if fr.tag == "title" {
+				if info.Title == "" {
+					info.Title = s
+				}
+			} else if info.H1 == "" {
+				info.H1 = s
+			}
+			*pend = nil
+			return
+		}
+		for _, c := range *pend {
+			if cs := cleanTitle(c.buf.String()); cs != "" {
+				if fr.tag == "title" {
+					if info.Title == "" {
+						info.Title = cs
+					}
+				} else if info.H1 == "" {
+					info.H1 = cs
+				}
+				break
+			}
+		}
+		*pend = nil
+	}
+	// elemStack tracks open elements (lowercased tag names) so the h1
+	// start-tag rule can mirror the tree builder exactly (x/net inBodyIM:
+	// pop p's in button scope, then pop a top h1-h6). It is also used to
+	// keep capture frames in sync when end tags close elements. Void
+	// elements are never pushed. This is an approximation of the full
+	// open-elements stack (no foster parenting, no adoption agency), but
+	// the h1 rule only inspects the top after p-popping, which this gets
+	// right; the fuzzer guards the rest.
+	var elemStack []string
+	const (
+		scopeDefault = iota
+		scopeListItem
+		scopeButton
+	)
+	isVoidElem := func(tn string) bool {
+		switch tn {
+		case "area", "base", "br", "col", "embed", "hr", "img",
+			"input", "link", "meta", "source", "track", "wbr":
+			return true
+		}
+		return false
+	}
+	isH1H6 := func(tn string) bool {
+		return tn == "h1" || tn == "h2" || tn == "h3" ||
+			tn == "h4" || tn == "h5" || tn == "h6"
+	}
+	// Section 12.2.4.2 stop tags (x/net defaultScopeStopTags[""]).
+	isScopeStop := func(tn string) bool {
+		switch tn {
+		case "applet", "caption", "html", "table", "td", "th",
+			"marquee", "object", "template", "select":
+			return true
+		}
+		return false
+	}
+	// isScopeCloser reports whether tn is in x/net's inBodyIM end-tag group
+	// (address..ul): implied end tags, then popUntil in default scope.
+	isScopeCloser := func(tn string) bool {
+		switch tn {
+		case "address", "article", "aside", "blockquote", "button",
+			"center", "details", "dialog", "dir", "div", "dl", "fieldset",
+			"figcaption", "figure", "footer", "header", "hgroup", "listing",
+			"main", "menu", "nav", "ol", "pre", "search", "section",
+			"select", "summary", "ul":
+			return true
+		}
+		return false
+	}
+	// foreignDepth counts open svg/math elements (even skipped ones): the
+	// tree builder substitutes U+FFFD for NUL bytes in foreign content
+	// instead of dropping them. Reset to 0 on svg breakout (which pops all
+	// foreign elements up to the HTML content).
+	foreignDepth := 0
+	// inForeign reports whether the current position is inside foreign
+	// content (an svg/math subtree), where the tree builder substitutes
+	// U+FFFD for NUL bytes instead of dropping them (x/net parse.go).
+	inForeign := func() bool { return foreignDepth > 0 }
+	// normText normalizes a text token the way the tree builder would:
+	// NUL -> U+FFFD in foreign content, NUL dropped elsewhere.
+	normText := func(data string) string {
+		if strings.IndexByte(data, 0) < 0 {
+			return data
+		}
+		if inForeign() {
+			return strings.ReplaceAll(data, "\x00", "�")
+		}
+		return dropNUL(data)
+	}
+	// isBreakoutTag mirrors x/net's foreign-content breakout list: these
+	// start tags pop an svg element and reprocess as HTML (plus font with
+	// color/face/size attributes).
+	isBreakoutTag := func(tn string) bool {
+		switch tn {
+		case "b", "big", "blockquote", "body", "br", "center", "code",
+			"dd", "div", "dl", "dt", "em", "embed", "h1", "h2", "h3",
+			"h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing",
+			"menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s",
+			"small", "span", "strong", "strike", "sub", "sup", "table",
+			"tt", "u", "ul", "var":
+			return true
+		case "font":
+			more := true
+			for more {
+				var k []byte
+				var m bool
+				k, _, m = z.TagAttr()
+				more = m
+				if equalFoldASCII(k, "color") || equalFoldASCII(k, "face") ||
+					equalFoldASCII(k, "size") {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	// popElemTo truncates elemStack to length n, dropping capture frames
+	// whose element is gone. A dropped frame writes its field only if no
+	// same-tag frame remains open below it (the DOM walk visits the outer
+	// element first, so the outermost frame's text — which includes the
+	// inner frames' text — is the one that counts).
+	popElemTo := func(n int) {
+		if n < 0 {
+			n = 0
+		}
+		if n > len(elemStack) {
+			n = len(elemStack)
+		}
+		elemStack = elemStack[:n]
+		kept := capStack[:0]
+		for _, fr := range capStack {
+			if fr.elemDepth > n {
+				// Dropped: outermost of its tag gets the decisive flush;
+				// inner frames become fallback candidates (pre-order).
+				outermost := true
+				for _, k := range kept {
+					if k.tag == fr.tag {
+						outermost = false
+						break
+					}
+				}
+				if outermost {
+					decisiveFlush(fr)
+				} else if fr.tag == "h1" {
+					pendingH1 = append(pendingH1, fr)
+				} else {
+					pendingTitle = append(pendingTitle, fr)
+				}
+				continue
+			}
+			kept = append(kept, fr)
+		}
+		for i := len(kept); i < len(capStack); i++ {
+			capStack[i] = nil
+		}
+		capStack = kept
+	}
+	// popUntilScope truncates elemStack below the highest in-scope match,
+	// mirroring x/net's popUntil (match beats stop tags at each level),
+	// keeping capture frames in sync via popElemTo.
+	popUntilScope := func(sc int, tags ...string) {
+		for i := len(elemStack) - 1; i >= 0; i-- {
+			t := elemStack[i]
+			for _, m := range tags {
+				if t == m {
+					popElemTo(i)
+					return
+				}
+			}
+			if isScopeStop(t) || (sc == scopeButton && t == "button") ||
+				(sc == scopeListItem && (t == "ol" || t == "ul")) {
+				return
+			}
+		}
+	}
+	// genImpliedEnds pops implied-end-tag elements (x/net
+	// generateImpliedEndTags) from the top of elemStack.
+	genImpliedEnds := func() {
+		for len(elemStack) > 0 {
+			switch elemStack[len(elemStack)-1] {
+			case "dd", "dt", "li", "optgroup", "option", "p",
+				"rb", "rp", "rt", "rtc":
+				popElemTo(len(elemStack) - 1)
+			default:
+				return
+			}
+		}
+	}
+	// isSpecialElem mirrors x/net's isSpecialElementMap (used by the
+	// generic end-tag rule, which stops at the first special element).
+	isSpecialElem := func(tn string) bool {
+		switch tn {
+		case "address", "applet", "area", "article", "aside", "base",
+			"basefont", "bgsound", "blockquote", "body", "br", "button",
+			"caption", "center", "col", "colgroup", "dd", "details", "dir",
+			"div", "dl", "dt", "embed", "fieldset", "figcaption", "figure",
+			"footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4",
+			"h5", "h6", "head", "header", "hgroup", "hr", "html", "iframe",
+			"img", "input", "keygen", "li", "link", "listing", "main",
+			"marquee", "menu", "meta", "nav", "noembed", "noframes",
+			"noscript", "object", "ol", "p", "param", "plaintext", "pre",
+			"script", "section", "select", "source", "style", "summary",
+			"table", "tbody", "td", "template", "textarea", "tfoot", "th",
+			"thead", "title", "tr", "track", "ul", "wbr", "xmp":
+			return true
+		}
+		return false
+	}
+	// inScope reports whether any of tags is in scope, using the same
+	// scope-stop logic as popUntilScope but without popping.
+	inScope := func(sc int, tags ...string) bool {
+		for i := len(elemStack) - 1; i >= 0; i-- {
+			t := elemStack[i]
+			for _, m := range tags {
+				if t == m {
+					return true
+				}
+			}
+			if isScopeStop(t) || (sc == scopeButton && t == "button") ||
+				(sc == scopeListItem && (t == "ol" || t == "ul")) {
+				return false
+			}
+		}
+		return false
+	}
+	// endTagActs reports whether an end tag actually does something in the
+	// tree builder (vs being dropped as a parse error). Ignored end tags
+	// create no DOM text boundary — the text on either side merges into a
+	// single node — so the text run must not end there either
+	// (fuzzer-found: "<Bod\x90>0</Bod\xe7>0" merges to one word).
+	endTagActs := func(tn string) bool {
+		switch {
+		case tn == "html" || tn == "head" || tn == "body":
+			return false
+		case tn == "br":
+			return true // x/net treats </br> as a <br> start tag
+		case tn == "p":
+			return true // auto-creates p when absent — always a boundary
+		case isH1H6(tn):
+			return inScope(scopeDefault, "h1", "h2", "h3", "h4", "h5", "h6")
+		case tn == "li":
+			return inScope(scopeListItem, "li")
+		case tn == "dd" || tn == "dt":
+			return inScope(scopeDefault, tn)
+		case isScopeCloser(tn):
+			return inScope(scopeDefault, tn)
+		default:
+			// inBodyEndTagOther: acts iff tn is found walking down
+			// before the first special element; otherwise ignored.
+			for i := len(elemStack) - 1; i >= 0; i-- {
+				if elemStack[i] == tn {
+					return true
+				}
+				if isSpecialElem(elemStack[i]) {
+					return false
+				}
+			}
+			return false
+		}
+	}
+
 	// Inside a title/h1 capture, textOf skips script/style descendants only
 	// (noscript/template/svg text still counts toward the title). capSkip
 	// suppresses those tokens for the word/SimHash path but not the capture.
@@ -144,74 +443,167 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				// Exception: script/style inside title/h1 is excluded from the
 				// title too (textOf), but noscript/template/svg text still
 				// counts toward the title — accumulate it into the capture.
-				if capTag != "" && (capSkip == "noscript" || capSkip == "template" || capSkip == "svg") {
-					accumCap(dropNUL(string(z.Text())), &capBuf, &capPendingSpace, capFlushSpace)
+				// (NUL handling is foreign-aware via normText: svg text gets
+				// U+FFFD like the tree builder produces.)
+				if len(capStack) > 0 && (capSkip == "noscript" || capSkip == "template" || capSkip == "svg") {
+					data := normText(string(z.Text()))
+					for i := range capStack {
+						accumFrame(capStack[i], data)
+					}
 				}
 				continue
 			}
-			data := dropNUL(string(z.Text()))
+			data := normText(string(z.Text()))
 			textRun.WriteString(data)
-			if capTag != "" {
-				accumCap(data, &capBuf, &capPendingSpace, capFlushSpace)
+			for i := range capStack {
+				accumFrame(capStack[i], data)
 			}
 		case html.StartTagToken, html.SelfClosingTagToken:
-			flushTextRun() // element boundary ends the text run
 			rawName, _ := z.TagName()
-			tn := strings.ToLower(string(rawName))
+			tn := lowerTagASCII(rawName)
+			// Document-structure tags never create text-node boundaries:
+			// duplicate html/head/body starts are ignored by the tree
+			// builder (attributes merged at most), and text around them is
+			// relocated into the body, merging runs the tokenizer splits
+			// (fuzzer-found: "0<head>0" is one DOM text node).
+			if tn != "html" && tn != "head" && tn != "body" {
+				flushTextRun() // element boundary ends the text run
+			}
 			start := tt == html.StartTagToken
-			if skipTag != "" {
-				if tn == skipTag && start {
+			// The tree builder ignores a self-closing flag on non-void
+			// elements (parse error, e.g. "<h1/>" opens h1). Mirror it for
+			// element/capture purposes — but not for skip regions: an
+			// opened-and-closed <svg/> has no content to skip.
+			effStart := start || (tt == html.SelfClosingTagToken && !isVoidElem(tn))
+			// Track foreign-content depth for NUL normalization (counted
+			// even for skipped subtrees — the skip only hides tokens from
+			// field extraction, not from foreign-ness).
+			if start && (tn == "svg" || tn == "math") {
+				foreignDepth++
+			}
+			// SVG foreign-content breakout: the tree builder pops an svg
+			// element and reprocesses breakout tags (b, div, h1, ...) as
+			// HTML, so their content counts (fuzzer-found: "<svg><B>0" has
+			// WordCount 1, but a plain subtree skip would swallow it).
+			// Applies to both the subtree skip (skipTag) and the in-capture
+			// skip (capSkip). (script/style are tokenizer rawtext and
+			// noscript/template have no breakout.)
+			if skipTag == "svg" || capSkip == "svg" {
+				if tn == "svg" && start {
+					if skipTag == "svg" {
+						skipDepth++
+					} else {
+						capSkipDepth++
+					}
+					continue
+				}
+				if start && isBreakoutTag(tn) {
+					if skipTag == "svg" {
+						skipTag, skipDepth = "", 0
+					} else {
+						capSkip, capSkipDepth = "", 0
+					}
+					// Breakout pops all foreign elements up to HTML content.
+					// (svg is never on elemStack — the skip continues before
+					// the push — so there is nothing to pop there.)
+					foreignDepth = 0
+				} else {
+					continue
+				}
+			} else if skipTag != "" {
+				if tn == skipTag && effStart {
 					skipDepth++
 				}
 				continue
-			}
-			if capSkip != "" {
-				if tn == capSkip && start {
+			} else if capSkip != "" {
+				if tn == capSkip && effStart {
 					capSkipDepth++
 				}
 				continue
 			}
-			if capTag != "" {
-				// Nested same-name start tag: the parser auto-closes the
-				// element, so flush the capture like an end tag would.
-				if tn == capTag && start {
-					flushCap()
-					// fall through: the fresh element starts a new capture
-					// only if the field is still empty (it isn't now)
-				} else if tn == "script" || tn == "style" {
-					if start {
+			// h1-h6 start-tag rule, mirroring x/net's inBodyIM exactly: pop
+			// p's in button scope, then pop a top h1-h6. popElemTo keeps
+			// capture frames in sync (a popped h1 frame writes its field).
+			if effStart && isH1H6(tn) {
+				popUntilScope(scopeButton, "p")
+				if len(elemStack) > 0 && isH1H6(elemStack[len(elemStack)-1]) {
+					popElemTo(len(elemStack) - 1)
+				}
+			}
+			if len(capStack) > 0 {
+				// skipEnters: the tree builder ignores the self-closing
+				// flag on HTML elements, so <script/> OPENS a script
+				// (raw text until </script> or EOF). Foreign <svg/>
+				// respects self-closing, so it does not open.
+				skipEnters := start || tn != "svg"
+				if tn == "script" || tn == "style" {
+					if skipEnters {
 						capSkip, capSkipDepth = tn, 1
 					}
 					continue
 				} else if isSkipTag(tn) {
-					if start {
+					if skipEnters {
 						capSkip, capSkipDepth = tn, 1
 					}
 					continue
 				}
-			} else if isSkipTag(tn) && start {
+			} else if isSkipTag(tn) && (start || tn != "svg") {
 				skipTag, skipDepth = tn, 1
+				// A self-closing HTML skip tag (<script/>) leaves the
+				// element open in the tree builder — track it on elemStack
+				// for end-tag/h1-rule mirroring.
+				if !start {
+					elemStack = append(elemStack, tn)
+				}
 				continue
 			}
-			selfClosing := !start
+			// Track open elements for the h1 rule above and end-tag mirroring
+			// below. Void and self-closing tags never stay open; neither do
+			// html/head/body — the tree builder ignores duplicate starts
+			// (attributes merged at most), so they must not hide an h1 from
+			// the h1 rule's top check (fuzzer-found: "<h1>0<BodY><h1>0").
+			// <image> is rewritten to <img> (void) by the tree builder.
+			if effStart && !isVoidElem(tn) && tn != "html" && tn != "head" &&
+				tn != "body" && tn != "image" {
+				// <a> start tag with `a` already open: x/net runs the
+				// adoption agency. Simple case (no special elements
+				// between the open `a` and the top): pop to the `a`
+				// (fuzzer-found: "<A><A></A>0</A>0" — without this the two
+				// `a`s nest and the text runs split). Complex reparenting
+				// (special element between) is deferred — see the fuzzer
+				// skip list.
+				if tn == "a" {
+					for i := len(elemStack) - 1; i >= 0; i-- {
+						if elemStack[i] == "a" {
+							complex := false
+							for j := i + 1; j < len(elemStack); j++ {
+								if isSpecialElem(elemStack[j]) {
+									complex = true
+									break
+								}
+							}
+							if !complex {
+								popElemTo(i)
+							}
+							break
+						}
+					}
+				}
+				elemStack = append(elemStack, tn)
+			}
 			switch tn {
 			case "title":
-				if capTag != "" && capTag != "title" {
-					break // a different capture is active: transparent content
-				}
-				if info.Title == "" && !selfClosing {
-					capTag, capDepth = "title", 1
-					capBuf.Reset()
-					capPendingSpace = false
+				// No "transparent content" skip: a <title> inside an active
+				// h1 capture is a real element per the DOM walk (h1 is not
+				// RCDATA), so it starts its own frame; text feeds both.
+				// (<title> inside <title> can't happen: the tokenizer treats
+				// title content as RCDATA.)
+				if info.Title == "" && effStart {
+					capStack = append(capStack, &capFrame{tag: "title", elemDepth: len(elemStack)})
 				}
 			case "h1":
-				if capTag != "" && capTag != "h1" {
-					break // a different capture is active: transparent content
-				}
-				if info.H1 == "" && !selfClosing {
-					capTag, capDepth = "h1", 1
-					capBuf.Reset()
-					capPendingSpace = false
+				if info.H1 == "" && effStart {
+					capStack = append(capStack, &capFrame{tag: "h1", elemDepth: len(elemStack)})
 				}
 			case "meta":
 				readMetaAttrs(z, info)
@@ -284,9 +676,22 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				}
 			}
 		case html.EndTagToken:
-			flushTextRun() // element boundary ends the text run
 			rawName, _ := z.TagName()
-			tn := strings.ToLower(string(rawName))
+			tn := lowerTagASCII(rawName)
+			// Only end tags the tree builder acts on end the text run. An
+			// ignored end tag (parse error, token dropped) creates no DOM
+			// text boundary — the text on either side merges into one node.
+			if endTagActs(tn) {
+				flushTextRun() // element boundary ends the text run
+			}
+			// Foreign-content depth tracks the tree builder even inside
+			// skipped subtrees.
+			if tn == "svg" || tn == "math" {
+				foreignDepth--
+				if foreignDepth < 0 {
+					foreignDepth = 0
+				}
+			}
 			if skipTag != "" {
 				if tn == skipTag {
 					skipDepth--
@@ -305,24 +710,81 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				}
 				continue
 			}
-			if capTag != "" && tn == capTag {
-				capDepth--
-				if capDepth == 0 {
-					flushCap()
+			// End-tag handling mirrors x/net's inBodyIM on elemStack; popElemTo
+			// keeps capture frames in sync (outermost-writes).
+			switch {
+			case tn == "br":
+				// x/net treats </br> as <br>: no stack change.
+			case tn == "p":
+				popUntilScope(scopeButton, "p")
+			case isH1H6(tn):
+				// No implied end tags, no scope pre-check (x/net popUntil).
+				popUntilScope(scopeDefault, "h1", "h2", "h3", "h4", "h5", "h6")
+			case tn == "li":
+				popUntilScope(scopeListItem, "li")
+			case tn == "dd" || tn == "dt":
+				popUntilScope(scopeDefault, tn)
+			case isScopeCloser(tn):
+				// address..ul case (x/net inBodyIM): implied end tags,
+				// then popUntil in default scope.
+				genImpliedEnds()
+				popUntilScope(scopeDefault, tn)
+			default:
+				// inBodyEndTagOther approximation: walk down from the top;
+				// stop at the first special element (formatting-element
+				// adoption-agency cases are out of scope — see the fuzzer
+				// skip list).
+				for i := len(elemStack) - 1; i >= 0; i-- {
+					if elemStack[i] == tn {
+						popElemTo(i)
+						break
+					}
+					if isSpecialElem(elemStack[i]) {
+						break
+					}
 				}
 			}
+		case html.DoctypeToken:
+			// The tree builder ignores DOCTYPE tokens everywhere except
+			// document-initial position (parse error otherwise), and a
+			// DOCTYPE never creates a text boundary — so no flush
+			// (fuzzer-found: "0<!DOCTYPE>0" merges to one word).
 		default:
-			// Comment/doctype tokens: in the DOM they are separate siblings
+			// Comment tokens: in the DOM they are separate siblings
 			// between text nodes, so they end the text run.
 			flushTextRun()
 		}
 	}
 done:
 	flushTextRun() // EOF ends the final text run
-	// Unclosed title/h1 at EOF: html.Parse auto-closes them, so flush.
-	if capTag != "" {
-		flushCap()
+	// Unclosed title/h1 at EOF: html.Parse auto-closes them, so flush —
+	// outermost frame of each tag gets the decisive flush (mirroring the
+	// DOM walk's pre-order visit); unclosed inner frames join the pending
+	// fallback candidates first.
+	for _, tag := range []string{"title", "h1"} {
+		var outer *capFrame
+		var inners []*capFrame
+		for _, fr := range capStack {
+			if fr.tag != tag {
+				continue
+			}
+			if outer == nil {
+				outer = fr
+			} else {
+				inners = append(inners, fr)
+			}
+		}
+		if outer == nil {
+			continue
+		}
+		if tag == "h1" {
+			pendingH1 = append(pendingH1, inners...)
+		} else {
+			pendingTitle = append(pendingTitle, inners...)
+		}
+		decisiveFlush(outer)
 	}
+	capStack = nil
 	info.WordCount = words // body text itself is never stored — only this count
 	// IG2: SimHash fingerprint for near-duplicate detection.
 	if textBuf.Len() > 0 {

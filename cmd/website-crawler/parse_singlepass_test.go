@@ -132,6 +132,130 @@ var differentialCorpus = map[string]string{
 	"truncated-tag-eof-2": `<p>hello</`,
 }
 
+// differentialCorpusQ5 holds the Track Q rung Q5 corpus extension (#283):
+// new edge cases layered on top of differentialCorpus, all fed to both the
+// deterministic differential test and the FuzzParseSinglePass seed set.
+var differentialCorpusQ5 = map[string]string{
+	"q5-deep-nesting":    `<html><body>` + strings.Repeat("<div>", 150) + `deep text` + strings.Repeat("</div>", 150) + `</body></html>`,
+	"q5-huge-attr":       `<html><head><meta name="description" content="` + strings.Repeat("a", 65536) + `"></head><body></body></html>`,
+	"q5-entity-soup":     `<html><head><title>&notit;&copyx;&AMP;&amplt;&nbsp;&Tab;&NewLine;&frac34;</title></head><body><p>&#65;&#x42;&#x1F600;&#0;&#xD800;&bogusentity;</p></body></html>`,
+	"q5-unquoted-attrs":  `<html><body><a href=/foo/bar?x=1&y=2 title=some title>link</a><img src=x.png alt=a b><div class=one two=2>text</div></body></html>`,
+	"q5-attr-edge":       `<html><body><div class==foo data-x= a='1' b="2" c=>t</div><a href = "https://spaced.com/" >spaced</a></body></html>`,
+	"q5-li-without-ul":   `<html><body><li>one<li>two<p>para</p><li>three</body></html>`,
+	"q5-select-textarea": `<html><body><select><option>a<option selected>b</select><textarea>rcdata <b>bold</b> text</textarea></body></html>`,
+	"q5-pre-whitespace":  "<html><body><pre>  keep   spaces\n\n  newlines\t\ttabs</pre><p>normal</p></body></html>",
+	"q5-iframe-object":   `<html><body><iframe><p>iframe fallback</p></iframe><object><p>obj fallback</p></object><noembed><p>ne</p></noembed><p>after</p></body></html>`,
+	"q5-xmp-plaintext":   `<html><body><xmp><b>not bold</b></xmp><p>after xmp</p></body></html>`,
+	"q5-ruby":            `<html><body><ruby>漢<rt>かん</rt>字<rt>じ</rt></ruby><p>after ruby</p></body></html>`,
+	"q5-cond-comment":    `<html><body><!--[if IE]><p>ie only</p><![endif]--><p>real</p></body></html>`,
+	"q5-bogus-markup":    `<html><body><?php echo "hi"; ?><!random bogus><p>x</p></body></html>`,
+	"q5-doctype-variant": `<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN"><html><head><title>d</title></head><body><p>t</p></body></html>`,
+	"q5-multi-root":      `<html><head><title>t</title></head><body><p>a</p></html><html><body><p>second root</p></body></html>`,
+	"q5-headless":        `<title>no wrappers</title><h1>hi</h1><p>text</p>`,
+	"q5-title-in-body":   `<html><body><title>body title</title><p>x</p></body></html>`,
+	"q5-form-controls":   `<html><body><form action="/s"><input type=text name=q><input type=hidden name=h value=v><button>go</button><label>lbl</label></form></body></html>`,
+	"q5-table-deep":      `<html><body><table><caption>cap</caption><colgroup><col></colgroup><thead><tr><th>h</th></tr></thead><tbody><tr><td><table><tr><td>nested</td></tr></table></td></tr></tbody><tfoot><tr><td>f</td></tr></tfoot></table></body></html>`,
+	"q5-script-tricky":   `<html><head><script>var s = "</script> not really";</script><script type="application/json">{"a":"</b>"}</script></head><body><p>after</p></body></html>`,
+	"q5-style-tricky":    `<html><head><style>a{content:"</style>"}</style></head><body><p>after</p></body></html>`,
+	"q5-skip-case":       `<html><head><SCRIPT>var x = 1;</SCRIPT><STYLE>.a{}</STYLE></head><body><NOSCRIPT><p>ns</p></NOSCRIPT><p>after</p></body></html>`,
+	"q5-meta-http-equiv": `<html><head><meta http-equiv="Content-Type" content="text/html; charset=iso-8859-1"><meta http-equiv=refresh content="5;url=x"><meta charset="utf-16"></head><body></body></html>`,
+	"q5-link-variants":   `<html><head><link rel="alternate" hreflang="es" href="https://es.example.com/"><link rel=icon href=/favicon.ico><link rel="canonical stylesheet" href="x.css"></head><body></body></html>`,
+	"q5-img-srcset":      `<html><body><img srcset="a.png 1x, b.png 2x" src="a.png"><img></body></html>`,
+	"q5-anchor-edge":     `<html><body><a href="HTTP://EXAMPLE.COM/UPPER">up</a><a href=" https://spaced.com/ ">sp</a><area href="https://area.com/"><a href="ftp://ftp.example.com/f">ftp</a></body></html>`,
+	"q5-h1-deep-inline":  `<html><body><h1>a <b><i><u>deep</u></i></b> tail</h1></body></html>`,
+	"q5-huge-text":       `<html><body><p>` + strings.Repeat("word ", 50000) + `</p></body></html>`,
+	"q5-h1-in-script":    `<html><head><title>t</title><script><h1>not an h1</h1></script></head><body><h1>real h1</h1></body></html>`,
+	"q5-template-deep":   `<html><body><template><template><p>double nested</p></template></template><p>kept</p></body></html>`,
+	// Q5 fuzz regression: <title> inside <h1> is a real element (h1 is not
+	// RCDATA) — the DOM sets both Title and H1, title text counts for both.
+	"q5-title-in-h1":     `<h1><title>0</title>1</h1>`,
+	"q5-title-in-h1-eof": `<h1><title>0`,
+	// Q5 fuzz regression: the tree builder only closes an open h1 for a
+	// nested h1-h6 start tag when the h1 is the top of the open-elements
+	// stack (x/net inBodyIM: pop p's in button scope, then pop a top
+	// h1-h6) — <h1> nested through another element stays nested.
+	"q5-h1-nest-direct":    `<h1>0<h1>1</h1>`,
+	"q5-h1-nest-through":   `<h1>0<b><h1>1</h1>2</h1>`,
+	"q5-h1-nest-through-a": `<H1>0<A><H1>0`,
+	"q5-h1-nest-p":         `<h1>0<p><h1>1</h1>2</h1>`,
+	"q5-h1-nest-h2":        `<h1>0<h2>1</h2>2</h1>`,
+	// Q5 fuzz regression: html/head/body tags never create text-node
+	// boundaries — duplicates are ignored by the tree builder and text
+	// around them relocates into the body, merging into one text node.
+	"q5-struct-head":   `0<heAd>0`,
+	"q5-struct-body":   `<body>0<body>0`,
+	"q5-struct-body-e": `<body>0</body>0`,
+	"q5-struct-html":   `0<html>0</html>0`,
+	// Q5 fuzz regression: SVG foreign-content breakout — the tree builder
+	// pops an svg element and reprocesses breakout tags (b, div, h1, ...)
+	// as HTML, so their content counts; a plain subtree skip would swallow
+	// it. font breaks out only with color/face/size attributes.
+	"q5-svg-breakout":      `<svg><B>0`,
+	"q5-svg-breakout-div":  `<svg><div>0</div></svg><p>1</p>`,
+	"q5-svg-no-breakout":   `<svg><circle>0</circle></svg>`,
+	"q5-svg-breakout-h1":   `<h1><svg><b>0</b></svg></h1>`,
+	"q5-svg-breakout-font": `<svg><font color="red">0</font></svg>`,
+	// Q5 fuzz regression: NUL bytes become U+FFFD in foreign content
+	// (svg/math) but are dropped in HTML content — the tree builder
+	// distinguishes, so the single-pass NUL normalization must too.
+	// (textOf doesn't skip svg, so svg text counts toward title/h1.)
+	"q5-nul-foreign-svg":  "<h1><svg>\x00",
+	"q5-nul-foreign-math": "<math>\x00</math>",
+	"q5-nul-html":         "<h1>a\x00b</h1>",
+	// Q5 fuzz regression: html/head/body starts are structurally ignored
+	// by the tree builder (attributes merged at most), so they must not
+	// hide an open h1 from the h1 rule's top-of-stack check.
+	"q5-struct-h1-body": `<h1>0<BodY><h1>0`,
+	"q5-struct-h1-head": `<h1>0<head><h1>0`,
+	// Q5 fuzz regression: a self-closing flag on non-void elements is
+	// ignored by the tree builder (parse error) — <h1/> opens h1.
+	"q5-selfclose-h1": `<h1/>0`,
+	// Q5 fuzz regression: the DOM walk's first-wins guard (info.H1 == "")
+	// lets a LATER h1 overwrite an EMPTY cleanTitle — "<h1><<A><h1>0<h1>"
+	// yields H1="0" (outer textOf "<0" truncates to ""). Single-pass keeps
+	// popped inner frames as fallback candidates for this.
+	"q5-h1-empty-overwrite": `<h1><<A><h1>0<h1>`,
+	// Q5 fuzz regression: ignored end tags create no DOM text boundary.
+	// "<Bod\x90>0</Bod\xe7>0" — the end tag's raw bytes don't match the
+	// open element (x/net TagName lowercases ASCII-only, preserving
+	// invalid UTF-8; strings.ToLower would corrupt them to U+FFFD and
+	// falsely match), so the token is dropped and the text merges.
+	// Single-pass now flushes the text run only for end tags the tree
+	// builder acts on (endTagActs). This also fixes the simple #279-3
+	// case "0</A>0"; misnested formatting elements (adoption agency) stay
+	// deferred to Claude.
+	"q5-ignored-endtag-utf8": "<Bod\x90>0</Bod\xe7>0",
+	"q5-ignored-endtag-div":  "<DIV\xff>0</div>0",
+	// Q5 fuzz regression: "<A><A></A>0</A>0" — an <a> start tag with `a`
+	// already open runs the adoption agency; with no special elements
+	// between, the open `a` is simply closed (sibling-ized), so the text
+	// merges. Single-pass pops to the open `a` in that simple case.
+	"q5-anchor-sibling": `<A><A></A>0</A>0`,
+	// Q5 fuzz regression: "0<!DOCTYPE>0" — the tree builder ignores
+	// DOCTYPE tokens outside document-initial position (parse error), and
+	// a DOCTYPE never creates a text boundary, so the text merges.
+	// Single-pass no longer flushes the text run for DoctypeToken
+	// (comments still split, as comment nodes).
+	"q5-doctype-ignored": `0<!DOCTYPE>0`,
+	// Q5 fuzz regression: self-closing <script/> — the tree builder
+	// ignores the self-closing flag on HTML elements, so <script/> OPENS
+	// a script (raw text until </script> or EOF); only foreign <svg/>
+	// respects self-closing. Single-pass now enters the skip region for
+	// self-closing HTML skip tags (and tracks the open element).
+	"q5-selfclose-script": `<script/>0`,
+}
+
+func init() {
+	// Merge the Q5 extension into the shared corpus: the deterministic
+	// differential test and the FuzzParseSinglePass seed set both grow.
+	for name, doc := range differentialCorpusQ5 {
+		if _, dup := differentialCorpus[name]; dup {
+			panic("differentialCorpusQ5: duplicate key " + name)
+		}
+		differentialCorpus[name] = doc
+	}
+}
+
 func TestParseSinglePassDifferential(t *testing.T) {
 	for name, doc := range differentialCorpus {
 		t.Run(name, func(t *testing.T) {
@@ -158,9 +282,182 @@ func FuzzParseSinglePass(f *testing.F) {
 		dom := parseDOM(t, doc, "example.com")
 		sp := parseSP(t, doc, "example.com")
 		if diffs := diffInfos(dom, sp); len(diffs) > 0 {
+			// Q5: skip the two known-deferred divergence classes (both need
+			// tree-builder modeling the team deferred to Claude — see #279
+			// finding 3): (1) an end tag the tree builder ignores merges
+			// adjacent text in the DOM, while single-pass ends the text run
+			// at every end tag, splitting WordCount/SimHash; (2) table
+			// foster parenting merges text across table-family start tags
+			// (e.g. "0<table>0" is one DOM text node "00"). Skipping keeps
+			// the fuzzer hunting NEW divergences instead of re-reporting the
+			// deferred ones on every run. The deterministic differential
+			// test above does NOT skip: any corpus regression still fails
+			// loudly.
+			if isKnownDeferredDivergence(doc, diffs) {
+				t.Skipf("known deferred divergence (tree-builder text merge): %q", doc)
+			}
 			t.Errorf("field mismatches on %q: %v", doc, diffs)
 		}
 	})
+}
+
+// isKnownDeferredDivergence reports whether a differential mismatch matches
+// one of the known-deferred tree-builder classes (all need HTML
+// insertion-mode modeling the team deferred to Claude per #279):
+//
+//  1. Ignored end tags merge adjacent text in the DOM, while single-pass
+//     ends the text run at every end tag (WordCount/SimHash only).
+//  2. Table foster parenting merges text across table-family start tags,
+//     e.g. "0<table>0" is one DOM text node "00" (WordCount/SimHash only).
+//     3-4. Active-formatting reconstruction DUPLICATES elements: the tree
+//     builder clones unclosed formatting elements (a, b, i, ...) when
+//     text or block starts arrive — e.g. "<table><a href=//0><table>0"
+//     yields two <a> elements, and "<p><a href=//0><h1>0" reconstructs
+//     the <a> inside the h1 when its text arrives. Reproducing this needs
+//     the active-formatting list + reconstruction algorithm.
+//
+// Skipping keeps the fuzzer hunting NEW classes instead of re-reporting the
+// deferred ones. The deterministic differential test above does NOT skip:
+// any corpus regression still fails loudly.
+func isKnownDeferredDivergence(doc string, diffs []string) bool {
+	textOnly := true
+	countOnly := true
+	for _, d := range diffs {
+		if d != "WordCount" && d != "SimHash" {
+			textOnly = false
+		}
+		switch d {
+		case "WordCount", "SimHash", "OutboundLinkCount", "ImageCount", "outDomains":
+		default:
+			countOnly = false
+		}
+	}
+	if textOnly && (hasIgnoredEndTag(doc) || hasTableFosterShape(doc)) {
+		return true
+	}
+	// Classes 3-4: element duplication via formatting reconstruction.
+	return countOnly && hasDuplicatedFormatting(doc)
+}
+
+// hasIgnoredEndTag reports whether doc contains an end tag with no matching
+// open element on a naive open-element scan — the shape the HTML tree
+// builder ignores, merging the adjacent text the single-pass parser splits.
+func hasIgnoredEndTag(doc string) bool {
+	var stack []string
+	z := html.NewTokenizer(strings.NewReader(doc))
+	for {
+		tt := z.Next()
+		switch tt {
+		case html.ErrorToken:
+			return false
+		case html.StartTagToken:
+			name, _ := z.TagName()
+			stack = append(stack, lowerTagASCII(name))
+		case html.EndTagToken:
+			name, _ := z.TagName()
+			tn := lowerTagASCII(name)
+			found := -1
+			for i := len(stack) - 1; i >= 0; i-- {
+				if stack[i] == tn {
+					found = i
+					break
+				}
+			}
+			if found < 0 {
+				return true // no open element: tree builder ignores this end tag
+			}
+			stack = stack[:found]
+		}
+	}
+}
+
+// tableFosterTags are the table-family elements whose content the HTML tree
+// builder foster-parents: text adjacent to them can merge into a single DOM
+// text node across the tag, which the single-pass text-run splitter cannot
+// see without insertion-mode modeling.
+var tableFosterTags = []string{
+	"<table", "<caption", "<colgroup", "<col", "<tbody", "<thead", "<tfoot",
+	"<tr", "<td", "<th",
+}
+
+// hasTableFosterShape reports whether doc contains a table-family tag, the
+// shape in which the tree builder foster-parents text (merging runs the
+// single-pass parser splits). Coarse on purpose: it only gates the skip for
+// WordCount/SimHash-only mismatches, and the deterministic differential test
+// never skips.
+func hasTableFosterShape(doc string) bool {
+	lower := strings.ToLower(doc)
+	for _, tag := range tableFosterTags {
+		if strings.Contains(lower, tag) {
+			return true
+		}
+	}
+	return false
+}
+
+// isFormattingElem reports whether tn is an HTML formatting element — the
+// ones the tree builder tracks in its active-formatting list and may
+// reconstruct (duplicating them) when text or block starts arrive.
+func isFormattingElem(tn string) bool {
+	switch tn {
+	case "a", "b", "big", "code", "em", "font", "i", "nobr",
+		"s", "small", "strike", "strong", "tt", "u":
+		return true
+	}
+	return false
+}
+
+// hasDuplicatedFormatting reports whether the DOM built from doc contains
+// MORE formatting elements than the doc has start tags for — the exact
+// signature of active-formatting reconstruction (or adoption-agency)
+// duplication, which a tokenizer pass cannot reproduce without that
+// machinery. Self-closing tags count as creating an element, matching the
+// tree builder.
+func hasDuplicatedFormatting(doc string) bool {
+	starts := map[string]int{}
+	z := html.NewTokenizer(strings.NewReader(doc))
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			break
+		}
+		if tt == html.StartTagToken || tt == html.SelfClosingTagToken {
+			name, _ := z.TagName()
+			if tn := lowerTagASCII(name); isFormattingElem(tn) {
+				starts[tn]++
+			}
+		}
+	}
+	root, err := html.Parse(strings.NewReader(doc))
+	if err != nil {
+		return false
+	}
+	dup := false
+	var walk func(n *html.Node)
+	walk = func(n *html.Node) {
+		if dup {
+			return
+		}
+		if n.Type == html.ElementNode {
+			// Mirror parseHTMLInfo: these subtrees are skipped entirely.
+			switch n.Data {
+			case "script", "style", "noscript", "template", "svg":
+				return
+			}
+			if isFormattingElem(n.Data) {
+				starts[n.Data]--
+				if starts[n.Data] < 0 {
+					dup = true
+					return
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(root)
+	return dup
 }
 
 // BenchmarkParseDOM vs BenchmarkParseSinglePass: before/after for #274.

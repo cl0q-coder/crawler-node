@@ -23,7 +23,7 @@ func TestScoreContentHealthy(t *testing.T) {
 func TestScoreContentParked(t *testing.T) {
 	cp := ContentPage{Page: Page{
 		Domain: "forsale.example", Title: "forsale.example",
-		Text:     "This domain is for sale. Buy this domain today. Make an offer.",
+		Text:      "This domain is for sale. Buy this domain today. Make an offer.",
 		WordCount: 12,
 	}}
 	s := ScoreContent(cp)

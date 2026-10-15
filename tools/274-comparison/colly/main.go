@@ -19,6 +19,7 @@
 //     of pages (FIFO starvation): the 1s gap is honored but scheduling
 //     differs from crawler-node's worker model, so throughput is not
 //     comparable (caught 2026-10-13: 298 pages/s with gaps honored).
+//
 // Sticky workers replicate the crawler-node faithful run exactly: each
 // worker is occupied for the full robots→1s→page sequence per host.
 //

@@ -90,18 +90,18 @@ func envInt(k string, def int) int {
 }
 
 var (
-	seedFlag      = flag.String("seed", os.Getenv("SEED_URL"), "comma-separated start URLs; overrides -seeds-file and the built-in defaults")
-	seedsFileFlag = flag.String("seeds-file", envOr("SEEDS_FILE", "seeds.txt"), "newline-delimited seed URL file (# comments ok)")
-	maxDepth      = flag.Int("max-depth", 4, "max BFS depth from the seed")
-	dsnFlag       = flag.String("dsn", envOr("DATABASE_URL", "postgres://cl0q:cl0q@localhost:5432/cl0q?sslmode=disable"), "PostgreSQL DSN")
-	idleFlag      = flag.Duration("idle", 60*time.Second, "pause before re-seeding when the queue drains")
-	maxPages      = flag.Int("max-pages", 5000, "max pages per BFS cycle before re-seeding (bounds memory)")
-	maxConns      = flag.Int("max-conns", 4, "max DB connections (dispatch loop is single-goroutine; capped for the shared 100-conn DB)")
-	dbSeedsN      = flag.Int("db-seeds", 200, "random existing domain_info domains added as seeds each cycle (0=off) — mines known domains for new outbound links to beat the fixed-seed plateau")
-	batchFlag     = flag.Int("db-batch", envInt("DB_BATCH", 200), "discovered domains buffered per INSERT (one commit) — fewer commits = far less remote DB load")
-	noBackfillFlag = flag.Bool("no-subdomain-backfill", false, "skip the background backfill of registrable_domain/is_subdomain for pre-existing rows")
+	seedFlag             = flag.String("seed", os.Getenv("SEED_URL"), "comma-separated start URLs; overrides -seeds-file and the built-in defaults")
+	seedsFileFlag        = flag.String("seeds-file", envOr("SEEDS_FILE", "seeds.txt"), "newline-delimited seed URL file (# comments ok)")
+	maxDepth             = flag.Int("max-depth", 4, "max BFS depth from the seed")
+	dsnFlag              = flag.String("dsn", envOr("DATABASE_URL", "postgres://cl0q:cl0q@localhost:5432/cl0q?sslmode=disable"), "PostgreSQL DSN")
+	idleFlag             = flag.Duration("idle", 60*time.Second, "pause before re-seeding when the queue drains")
+	maxPages             = flag.Int("max-pages", 5000, "max pages per BFS cycle before re-seeding (bounds memory)")
+	maxConns             = flag.Int("max-conns", 4, "max DB connections (dispatch loop is single-goroutine; capped for the shared 100-conn DB)")
+	dbSeedsN             = flag.Int("db-seeds", 200, "random existing domain_info domains added as seeds each cycle (0=off) — mines known domains for new outbound links to beat the fixed-seed plateau")
+	batchFlag            = flag.Int("db-batch", envInt("DB_BATCH", 200), "discovered domains buffered per INSERT (one commit) — fewer commits = far less remote DB load")
+	noBackfillFlag       = flag.Bool("no-subdomain-backfill", false, "skip the background backfill of registrable_domain/is_subdomain for pre-existing rows")
 	maxSubsPerParentFlag = flag.Int("max-subdomains-per-parent", envInt("MAX_SUBDOMAINS_PER_PARENT", 10000), "max subdomains stored per registrable parent (0=off) — caps runaway discovery from wildcard DNS or huge platforms")
-	queueCap      = flag.Int("queue-cap", envInt("QUEUE_CAP", 50000), "max URLs queued at once (bounds BFS memory; 0=unbounded). Fan-out pages can otherwise push this to 500k+ and OOM the box.")
+	queueCap             = flag.Int("queue-cap", envInt("QUEUE_CAP", 50000), "max URLs queued at once (bounds BFS memory; 0=unbounded). Fan-out pages can otherwise push this to 500k+ and OOM the box.")
 	// A2 (#133): concurrent fetch workers. Tunable DOWN only — fewer workers is gentler; the politeness floors
 	// stay one-directional, so more workers can never buy speed past them.
 	discoveryWorkers = flag.Int("discovery-workers", envInt("DISCOVERY_WORKERS", maxDiscoveryWorkers), "concurrent discovery fetch workers (at most 16; tunable down only)")

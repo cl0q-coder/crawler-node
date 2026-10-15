@@ -186,6 +186,15 @@ var differentialCorpusQ5 = map[string]string{
 	"q5-struct-body":   `<body>0<body>0`,
 	"q5-struct-body-e": `<body>0</body>0`,
 	"q5-struct-html":   `0<html>0</html>0`,
+	// Q5 fuzz regression: SVG foreign-content breakout — the tree builder
+	// pops an svg element and reprocesses breakout tags (b, div, h1, ...)
+	// as HTML, so their content counts; a plain subtree skip would swallow
+	// it. font breaks out only with color/face/size attributes.
+	"q5-svg-breakout":      `<svg><B>0`,
+	"q5-svg-breakout-div":  `<svg><div>0</div></svg><p>1</p>`,
+	"q5-svg-no-breakout":   `<svg><circle>0</circle></svg>`,
+	"q5-svg-breakout-h1":   `<h1><svg><b>0</b></svg></h1>`,
+	"q5-svg-breakout-font": `<svg><font color="red">0</font></svg>`,
 }
 
 func init() {

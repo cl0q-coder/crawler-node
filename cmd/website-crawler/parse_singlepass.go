@@ -183,6 +183,33 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 		}
 		return false
 	}
+	// isBreakoutTag mirrors x/net's foreign-content breakout list: these
+	// start tags pop an svg element and reprocess as HTML (plus font with
+	// color/face/size attributes).
+	isBreakoutTag := func(tn string) bool {
+		switch tn {
+		case "b", "big", "blockquote", "body", "br", "center", "code",
+			"dd", "div", "dl", "dt", "em", "embed", "h1", "h2", "h3",
+			"h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing",
+			"menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s",
+			"small", "span", "strong", "strike", "sub", "sup", "table",
+			"tt", "u", "ul", "var":
+			return true
+		case "font":
+			more := true
+			for more {
+				var k []byte
+				var m bool
+				k, _, m = z.TagAttr()
+				more = m
+				if equalFoldASCII(k, "color") || equalFoldASCII(k, "face") ||
+					equalFoldASCII(k, "size") {
+					return true
+				}
+			}
+		}
+		return false
+	}
 	// popElemTo truncates elemStack to length n, dropping capture frames
 	// whose element is gone. A dropped frame writes its field only if no
 	// same-tag frame remains open below it (the DOM walk visits the outer
@@ -313,13 +340,43 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				flushTextRun() // element boundary ends the text run
 			}
 			start := tt == html.StartTagToken
-			if skipTag != "" {
+			// SVG foreign-content breakout: the tree builder pops an svg
+			// element and reprocesses breakout tags (b, div, h1, ...) as
+			// HTML, so their content counts (fuzzer-found: "<svg><B>0" has
+			// WordCount 1, but a plain subtree skip would swallow it).
+			// Applies to both the subtree skip (skipTag) and the in-capture
+			// skip (capSkip). (script/style are tokenizer rawtext and
+			// noscript/template have no breakout.)
+			if skipTag == "svg" || capSkip == "svg" {
+				if tn == "svg" && start {
+					if skipTag == "svg" {
+						skipDepth++
+					} else {
+						capSkipDepth++
+					}
+					continue
+				}
+				if start && isBreakoutTag(tn) {
+					if skipTag == "svg" {
+						skipTag, skipDepth = "", 0
+					} else {
+						capSkip, capSkipDepth = "", 0
+					}
+					for i := len(elemStack) - 1; i >= 0; i-- {
+						if elemStack[i] == "svg" {
+							popElemTo(i)
+							break
+						}
+					}
+				} else {
+					continue
+				}
+			} else if skipTag != "" {
 				if tn == skipTag && start {
 					skipDepth++
 				}
 				continue
-			}
-			if capSkip != "" {
+			} else if capSkip != "" {
 				if tn == capSkip && start {
 					capSkipDepth++
 				}

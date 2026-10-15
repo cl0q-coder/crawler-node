@@ -127,15 +127,44 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			fr.pendingSpace = false
 		})
 	}
-	flushCapFrame := func(fr *capFrame) {
+	// pendingTitle/pendingH1 hold popped inner frames in pre-order. The DOM
+	// walk visits same-tag elements in pre-order and its "first wins" guard
+	// (info.Title/H1 == "") lets a later element overwrite an EMPTY
+	// cleanTitle — e.g. "<h1><<A><h1>0<h1>" yields H1="0" (the outer h1's
+	// textOf is "<0", which cleanTitle truncates to ""). So when the
+	// outermost frame flushes empty, the first non-empty pending candidate
+	// wins; a non-empty outermost flush discards the candidates.
+	var pendingTitle, pendingH1 []*capFrame
+	decisiveFlush := func(fr *capFrame) {
 		s := cleanTitle(fr.buf.String())
+		pend := &pendingH1
 		if fr.tag == "title" {
-			if info.Title == "" {
-				info.Title = s
-			}
-		} else if info.H1 == "" {
-			info.H1 = s
+			pend = &pendingTitle
 		}
+		if s != "" {
+			if fr.tag == "title" {
+				if info.Title == "" {
+					info.Title = s
+				}
+			} else if info.H1 == "" {
+				info.H1 = s
+			}
+			*pend = nil
+			return
+		}
+		for _, c := range *pend {
+			if cs := cleanTitle(c.buf.String()); cs != "" {
+				if fr.tag == "title" {
+					if info.Title == "" {
+						info.Title = cs
+					}
+				} else if info.H1 == "" {
+					info.H1 = cs
+				}
+				break
+			}
+		}
+		*pend = nil
 	}
 	// elemStack tracks open elements (lowercased tag names) so the h1
 	// start-tag rule can mirror the tree builder exactly (x/net inBodyIM:
@@ -248,15 +277,21 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 		kept := capStack[:0]
 		for _, fr := range capStack {
 			if fr.elemDepth > n {
-				inner := false
+				// Dropped: outermost of its tag gets the decisive flush;
+				// inner frames become fallback candidates (pre-order).
+				outermost := true
 				for _, k := range kept {
 					if k.tag == fr.tag {
-						inner = true
+						outermost = false
 						break
 					}
 				}
-				if !inner {
-					flushCapFrame(fr)
+				if outermost {
+					decisiveFlush(fr)
+				} else if fr.tag == "h1" {
+					pendingH1 = append(pendingH1, fr)
+				} else {
+					pendingTitle = append(pendingTitle, fr)
 				}
 				continue
 			}
@@ -611,11 +646,31 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 done:
 	flushTextRun() // EOF ends the final text run
 	// Unclosed title/h1 at EOF: html.Parse auto-closes them, so flush —
-	// outermost first, mirroring the DOM walk's pre-order visit (a later
-	// same-tag frame's write is suppressed by the info-field guard in
-	// flushCapFrame once the outer frame has written).
-	for i := range capStack {
-		flushCapFrame(capStack[i])
+	// outermost frame of each tag gets the decisive flush (mirroring the
+	// DOM walk's pre-order visit); unclosed inner frames join the pending
+	// fallback candidates first.
+	for _, tag := range []string{"title", "h1"} {
+		var outer *capFrame
+		var inners []*capFrame
+		for _, fr := range capStack {
+			if fr.tag != tag {
+				continue
+			}
+			if outer == nil {
+				outer = fr
+			} else {
+				inners = append(inners, fr)
+			}
+		}
+		if outer == nil {
+			continue
+		}
+		if tag == "h1" {
+			pendingH1 = append(pendingH1, inners...)
+		} else {
+			pendingTitle = append(pendingTitle, inners...)
+		}
+		decisiveFlush(outer)
 	}
 	capStack = nil
 	info.WordCount = words // body text itself is never stored — only this count

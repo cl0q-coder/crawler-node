@@ -210,6 +210,11 @@ var differentialCorpusQ5 = map[string]string{
 	// Q5 fuzz regression: a self-closing flag on non-void elements is
 	// ignored by the tree builder (parse error) — <h1/> opens h1.
 	"q5-selfclose-h1": `<h1/>0`,
+	// Q5 fuzz regression: the DOM walk's first-wins guard (info.H1 == "")
+	// lets a LATER h1 overwrite an EMPTY cleanTitle — "<h1><<A><h1>0<h1>"
+	// yields H1="0" (outer textOf "<0" truncates to ""). Single-pass keeps
+	// popped inner frames as fallback candidates for this.
+	"q5-h1-empty-overwrite": `<h1><<A><h1>0<h1>`,
 }
 
 func init() {

@@ -195,6 +195,13 @@ var differentialCorpusQ5 = map[string]string{
 	"q5-svg-no-breakout":   `<svg><circle>0</circle></svg>`,
 	"q5-svg-breakout-h1":   `<h1><svg><b>0</b></svg></h1>`,
 	"q5-svg-breakout-font": `<svg><font color="red">0</font></svg>`,
+	// Q5 fuzz regression: NUL bytes become U+FFFD in foreign content
+	// (svg/math) but are dropped in HTML content — the tree builder
+	// distinguishes, so the single-pass NUL normalization must too.
+	// (textOf doesn't skip svg, so svg text counts toward title/h1.)
+	"q5-nul-foreign-svg":  "<h1><svg>\x00",
+	"q5-nul-foreign-math": "<math>\x00</math>",
+	"q5-nul-html":         "<h1>a\x00b</h1>",
 }
 
 func init() {

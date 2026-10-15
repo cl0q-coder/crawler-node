@@ -60,6 +60,8 @@ func isSkipTag(tn string) bool {
 // dropNUL matches html.Parse: the tree builder ignores U+0000 character
 // tokens, while html.Tokenizer passes NUL bytes through in text tokens.
 // Strip them so both paths see identical text (found by FuzzParseSinglePass).
+// In foreign content (svg/math) the tree builder substitutes U+FFFD instead
+// — normText handles that case.
 func dropNUL(s string) string {
 	if strings.IndexByte(s, 0) < 0 {
 		return s
@@ -182,6 +184,26 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			return true
 		}
 		return false
+	}
+	// foreignDepth counts open svg/math elements (even skipped ones): the
+	// tree builder substitutes U+FFFD for NUL bytes in foreign content
+	// instead of dropping them. Reset to 0 on svg breakout (which pops all
+	// foreign elements up to the HTML content).
+	foreignDepth := 0
+	// inForeign reports whether the current position is inside foreign
+	// content (an svg/math subtree), where the tree builder substitutes
+	// U+FFFD for NUL bytes instead of dropping them (x/net parse.go).
+	inForeign := func() bool { return foreignDepth > 0 }
+	// normText normalizes a text token the way the tree builder would:
+	// NUL -> U+FFFD in foreign content, NUL dropped elsewhere.
+	normText := func(data string) string {
+		if strings.IndexByte(data, 0) < 0 {
+			return data
+		}
+		if inForeign() {
+			return strings.ReplaceAll(data, "\x00", "�")
+		}
+		return dropNUL(data)
 	}
 	// isBreakoutTag mirrors x/net's foreign-content breakout list: these
 	// start tags pop an svg element and reprocess as HTML (plus font with
@@ -315,15 +337,17 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				// Exception: script/style inside title/h1 is excluded from the
 				// title too (textOf), but noscript/template/svg text still
 				// counts toward the title — accumulate it into the capture.
+				// (NUL handling is foreign-aware via normText: svg text gets
+				// U+FFFD like the tree builder produces.)
 				if len(capStack) > 0 && (capSkip == "noscript" || capSkip == "template" || capSkip == "svg") {
-					data := dropNUL(string(z.Text()))
+					data := normText(string(z.Text()))
 					for i := range capStack {
 						accumFrame(capStack[i], data)
 					}
 				}
 				continue
 			}
-			data := dropNUL(string(z.Text()))
+			data := normText(string(z.Text()))
 			textRun.WriteString(data)
 			for i := range capStack {
 				accumFrame(capStack[i], data)
@@ -340,6 +364,12 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				flushTextRun() // element boundary ends the text run
 			}
 			start := tt == html.StartTagToken
+			// Track foreign-content depth for NUL normalization (counted
+			// even for skipped subtrees — the skip only hides tokens from
+			// field extraction, not from foreign-ness).
+			if start && (tn == "svg" || tn == "math") {
+				foreignDepth++
+			}
 			// SVG foreign-content breakout: the tree builder pops an svg
 			// element and reprocesses breakout tags (b, div, h1, ...) as
 			// HTML, so their content counts (fuzzer-found: "<svg><B>0" has
@@ -362,12 +392,10 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 					} else {
 						capSkip, capSkipDepth = "", 0
 					}
-					for i := len(elemStack) - 1; i >= 0; i-- {
-						if elemStack[i] == "svg" {
-							popElemTo(i)
-							break
-						}
-					}
+					// Breakout pops all foreign elements up to HTML content.
+					// (svg is never on elemStack — the skip continues before
+					// the push — so there is nothing to pop there.)
+					foreignDepth = 0
 				} else {
 					continue
 				}
@@ -504,6 +532,14 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			// nodes (text after them is reprocessed into the body).
 			if tn != "html" && tn != "head" && tn != "body" {
 				flushTextRun() // element boundary ends the text run
+			}
+			// Foreign-content depth tracks the tree builder even inside
+			// skipped subtrees.
+			if tn == "svg" || tn == "math" {
+				foreignDepth--
+				if foreignDepth < 0 {
+					foreignDepth = 0
+				}
 			}
 			if skipTag != "" {
 				if tn == skipTag {

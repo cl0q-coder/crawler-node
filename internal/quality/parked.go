@@ -33,7 +33,8 @@ type Page struct {
 
 // Verdict is a detector's answer for one page.
 type Verdict struct {
-	Parked  bool     // Score >= ParkedThreshold
+	Parked  bool     // Score >= ParkedThreshold (K1)
+	Soft404 bool     // Score >= Soft404Threshold (K2)
 	Score   float64  // weighted signal strength in [0,1]
 	Reasons []string // auditable signal codes, e.g. "text:buy-this-domain"
 }

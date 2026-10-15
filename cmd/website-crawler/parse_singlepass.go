@@ -733,8 +733,13 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 					}
 				}
 			}
+		case html.DoctypeToken:
+			// The tree builder ignores DOCTYPE tokens everywhere except
+			// document-initial position (parse error otherwise), and a
+			// DOCTYPE never creates a text boundary — so no flush
+			// (fuzzer-found: "0<!DOCTYPE>0" merges to one word).
 		default:
-			// Comment/doctype tokens: in the DOM they are separate siblings
+			// Comment tokens: in the DOM they are separate siblings
 			// between text nodes, so they end the text run.
 			flushTextRun()
 		}

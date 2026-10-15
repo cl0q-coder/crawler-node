@@ -231,6 +231,12 @@ var differentialCorpusQ5 = map[string]string{
 	// between, the open `a` is simply closed (sibling-ized), so the text
 	// merges. Single-pass pops to the open `a` in that simple case.
 	"q5-anchor-sibling": `<A><A></A>0</A>0`,
+	// Q5 fuzz regression: "0<!DOCTYPE>0" — the tree builder ignores
+	// DOCTYPE tokens outside document-initial position (parse error), and
+	// a DOCTYPE never creates a text boundary, so the text merges.
+	// Single-pass no longer flushes the text run for DoctypeToken
+	// (comments still split, as comment nodes).
+	"q5-doctype-ignored": `0<!DOCTYPE>0`,
 }
 
 func init() {

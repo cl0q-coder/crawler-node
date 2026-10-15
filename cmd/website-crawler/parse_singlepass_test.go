@@ -207,6 +207,9 @@ var differentialCorpusQ5 = map[string]string{
 	// hide an open h1 from the h1 rule's top-of-stack check.
 	"q5-struct-h1-body": `<h1>0<BodY><h1>0`,
 	"q5-struct-h1-head": `<h1>0<head><h1>0`,
+	// Q5 fuzz regression: a self-closing flag on non-void elements is
+	// ignored by the tree builder (parse error) — <h1/> opens h1.
+	"q5-selfclose-h1": `<h1/>0`,
 }
 
 func init() {

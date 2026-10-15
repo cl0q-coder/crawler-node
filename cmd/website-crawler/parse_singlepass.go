@@ -364,6 +364,11 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				flushTextRun() // element boundary ends the text run
 			}
 			start := tt == html.StartTagToken
+			// The tree builder ignores a self-closing flag on non-void
+			// elements (parse error, e.g. "<h1/>" opens h1). Mirror it for
+			// element/capture purposes — but not for skip regions: an
+			// opened-and-closed <svg/> has no content to skip.
+			effStart := start || (tt == html.SelfClosingTagToken && !isVoidElem(tn))
 			// Track foreign-content depth for NUL normalization (counted
 			// even for skipped subtrees — the skip only hides tokens from
 			// field extraction, not from foreign-ness).
@@ -413,7 +418,7 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			// h1-h6 start-tag rule, mirroring x/net's inBodyIM exactly: pop
 			// p's in button scope, then pop a top h1-h6. popElemTo keeps
 			// capture frames in sync (a popped h1 frame writes its field).
-			if start && isH1H6(tn) {
+			if effStart && isH1H6(tn) {
 				popUntilScope(scopeButton, "p")
 				if len(elemStack) > 0 && isH1H6(elemStack[len(elemStack)-1]) {
 					popElemTo(len(elemStack) - 1)
@@ -441,11 +446,10 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			// (attributes merged at most), so they must not hide an h1 from
 			// the h1 rule's top check (fuzzer-found: "<h1>0<BodY><h1>0").
 			// <image> is rewritten to <img> (void) by the tree builder.
-			if start && !isVoidElem(tn) && tn != "html" && tn != "head" &&
+			if effStart && !isVoidElem(tn) && tn != "html" && tn != "head" &&
 				tn != "body" && tn != "image" {
 				elemStack = append(elemStack, tn)
 			}
-			selfClosing := !start
 			switch tn {
 			case "title":
 				// No "transparent content" skip: a <title> inside an active
@@ -453,11 +457,11 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				// RCDATA), so it starts its own frame; text feeds both.
 				// (<title> inside <title> can't happen: the tokenizer treats
 				// title content as RCDATA.)
-				if info.Title == "" && !selfClosing {
+				if info.Title == "" && effStart {
 					capStack = append(capStack, &capFrame{tag: "title", elemDepth: len(elemStack)})
 				}
 			case "h1":
-				if info.H1 == "" && !selfClosing {
+				if info.H1 == "" && effStart {
 					capStack = append(capStack, &capFrame{tag: "h1", elemDepth: len(elemStack)})
 				}
 			case "meta":

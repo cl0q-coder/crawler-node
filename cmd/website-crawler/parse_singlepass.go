@@ -103,27 +103,171 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 	z := html.NewTokenizer(r)
 	var skipTag string // non-empty while inside a skipped subtree
 	skipDepth := 0
-	// title/h1 capture: mirrors textOf's pendingSpace collapse.
-	var capTag string // "title" or "h1" while capturing
-	capDepth := 0
-	var capBuf strings.Builder
-	capPendingSpace := false
-	capFlushSpace := func() {
-		if capPendingSpace && capBuf.Len() > 0 {
-			capBuf.WriteByte(' ')
-		}
-		capPendingSpace = false
+	// title/h1 capture: mirrors textOf's pendingSpace collapse. A stack of
+	// frames (not a single slot) because the DOM walk treats <title> as a
+	// real element even inside <h1> — h1 is not RCDATA, so <h1><title>0 sets
+	// BOTH Title and H1, and the title's text counts toward the h1 too
+	// (textOf includes descendants). Text feeds every open frame.
+	// elemDepth is len(elemStack) just after the frame's element was
+	// pushed; popElemTo drops frames whose element is gone.
+	type capFrame struct {
+		tag          string // "title" or "h1"
+		buf          strings.Builder
+		pendingSpace bool
+		elemDepth    int
 	}
-	flushCap := func() {
-		s := cleanTitle(capBuf.String())
-		if capTag == "title" {
+	var capStack []*capFrame
+	accumFrame := func(fr *capFrame, data string) {
+		accumCap(data, &fr.buf, &fr.pendingSpace, func() {
+			if fr.pendingSpace && fr.buf.Len() > 0 {
+				fr.buf.WriteByte(' ')
+			}
+			fr.pendingSpace = false
+		})
+	}
+	flushCapFrame := func(fr *capFrame) {
+		s := cleanTitle(fr.buf.String())
+		if fr.tag == "title" {
 			if info.Title == "" {
 				info.Title = s
 			}
 		} else if info.H1 == "" {
 			info.H1 = s
 		}
-		capTag = ""
+	}
+	// elemStack tracks open elements (lowercased tag names) so the h1
+	// start-tag rule can mirror the tree builder exactly (x/net inBodyIM:
+	// pop p's in button scope, then pop a top h1-h6). It is also used to
+	// keep capture frames in sync when end tags close elements. Void
+	// elements are never pushed. This is an approximation of the full
+	// open-elements stack (no foster parenting, no adoption agency), but
+	// the h1 rule only inspects the top after p-popping, which this gets
+	// right; the fuzzer guards the rest.
+	var elemStack []string
+	const (
+		scopeDefault = iota
+		scopeListItem
+		scopeButton
+	)
+	isVoidElem := func(tn string) bool {
+		switch tn {
+		case "area", "base", "br", "col", "embed", "hr", "img",
+			"input", "link", "meta", "source", "track", "wbr":
+			return true
+		}
+		return false
+	}
+	isH1H6 := func(tn string) bool {
+		return tn == "h1" || tn == "h2" || tn == "h3" ||
+			tn == "h4" || tn == "h5" || tn == "h6"
+	}
+	// Section 12.2.4.2 stop tags (x/net defaultScopeStopTags[""]).
+	isScopeStop := func(tn string) bool {
+		switch tn {
+		case "applet", "caption", "html", "table", "td", "th",
+			"marquee", "object", "template", "select":
+			return true
+		}
+		return false
+	}
+	// isScopeCloser reports whether tn is in x/net's inBodyIM end-tag group
+	// (address..ul): implied end tags, then popUntil in default scope.
+	isScopeCloser := func(tn string) bool {
+		switch tn {
+		case "address", "article", "aside", "blockquote", "button",
+			"center", "details", "dialog", "dir", "div", "dl", "fieldset",
+			"figcaption", "figure", "footer", "header", "hgroup", "listing",
+			"main", "menu", "nav", "ol", "pre", "search", "section",
+			"select", "summary", "ul":
+			return true
+		}
+		return false
+	}
+	// popElemTo truncates elemStack to length n, dropping capture frames
+	// whose element is gone. A dropped frame writes its field only if no
+	// same-tag frame remains open below it (the DOM walk visits the outer
+	// element first, so the outermost frame's text — which includes the
+	// inner frames' text — is the one that counts).
+	popElemTo := func(n int) {
+		if n < 0 {
+			n = 0
+		}
+		if n > len(elemStack) {
+			n = len(elemStack)
+		}
+		elemStack = elemStack[:n]
+		kept := capStack[:0]
+		for _, fr := range capStack {
+			if fr.elemDepth > n {
+				inner := false
+				for _, k := range kept {
+					if k.tag == fr.tag {
+						inner = true
+						break
+					}
+				}
+				if !inner {
+					flushCapFrame(fr)
+				}
+				continue
+			}
+			kept = append(kept, fr)
+		}
+		for i := len(kept); i < len(capStack); i++ {
+			capStack[i] = nil
+		}
+		capStack = kept
+	}
+	// popUntilScope truncates elemStack below the highest in-scope match,
+	// mirroring x/net's popUntil (match beats stop tags at each level),
+	// keeping capture frames in sync via popElemTo.
+	popUntilScope := func(sc int, tags ...string) {
+		for i := len(elemStack) - 1; i >= 0; i-- {
+			t := elemStack[i]
+			for _, m := range tags {
+				if t == m {
+					popElemTo(i)
+					return
+				}
+			}
+			if isScopeStop(t) || (sc == scopeButton && t == "button") ||
+				(sc == scopeListItem && (t == "ol" || t == "ul")) {
+				return
+			}
+		}
+	}
+	// genImpliedEnds pops implied-end-tag elements (x/net
+	// generateImpliedEndTags) from the top of elemStack.
+	genImpliedEnds := func() {
+		for len(elemStack) > 0 {
+			switch elemStack[len(elemStack)-1] {
+			case "dd", "dt", "li", "optgroup", "option", "p",
+				"rb", "rp", "rt", "rtc":
+				popElemTo(len(elemStack) - 1)
+			default:
+				return
+			}
+		}
+	}
+	// isSpecialElem mirrors x/net's isSpecialElementMap (used by the
+	// generic end-tag rule, which stops at the first special element).
+	isSpecialElem := func(tn string) bool {
+		switch tn {
+		case "address", "applet", "area", "article", "aside", "base",
+			"basefont", "bgsound", "blockquote", "body", "br", "button",
+			"caption", "center", "col", "colgroup", "dd", "details", "dir",
+			"div", "dl", "dt", "embed", "fieldset", "figcaption", "figure",
+			"footer", "form", "frame", "frameset", "h1", "h2", "h3", "h4",
+			"h5", "h6", "head", "header", "hgroup", "hr", "html", "iframe",
+			"img", "input", "keygen", "li", "link", "listing", "main",
+			"marquee", "menu", "meta", "nav", "noembed", "noframes",
+			"noscript", "object", "ol", "p", "param", "plaintext", "pre",
+			"script", "section", "select", "source", "style", "summary",
+			"table", "tbody", "td", "template", "textarea", "tfoot", "th",
+			"thead", "title", "tr", "track", "ul", "wbr", "xmp":
+			return true
+		}
+		return false
 	}
 	// Inside a title/h1 capture, textOf skips script/style descendants only
 	// (noscript/template/svg text still counts toward the title). capSkip
@@ -144,15 +288,18 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				// Exception: script/style inside title/h1 is excluded from the
 				// title too (textOf), but noscript/template/svg text still
 				// counts toward the title — accumulate it into the capture.
-				if capTag != "" && (capSkip == "noscript" || capSkip == "template" || capSkip == "svg") {
-					accumCap(dropNUL(string(z.Text())), &capBuf, &capPendingSpace, capFlushSpace)
+				if len(capStack) > 0 && (capSkip == "noscript" || capSkip == "template" || capSkip == "svg") {
+					data := dropNUL(string(z.Text()))
+					for i := range capStack {
+						accumFrame(capStack[i], data)
+					}
 				}
 				continue
 			}
 			data := dropNUL(string(z.Text()))
 			textRun.WriteString(data)
-			if capTag != "" {
-				accumCap(data, &capBuf, &capPendingSpace, capFlushSpace)
+			for i := range capStack {
+				accumFrame(capStack[i], data)
 			}
 		case html.StartTagToken, html.SelfClosingTagToken:
 			flushTextRun() // element boundary ends the text run
@@ -171,14 +318,17 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				}
 				continue
 			}
-			if capTag != "" {
-				// Nested same-name start tag: the parser auto-closes the
-				// element, so flush the capture like an end tag would.
-				if tn == capTag && start {
-					flushCap()
-					// fall through: the fresh element starts a new capture
-					// only if the field is still empty (it isn't now)
-				} else if tn == "script" || tn == "style" {
+			// h1-h6 start-tag rule, mirroring x/net's inBodyIM exactly: pop
+			// p's in button scope, then pop a top h1-h6. popElemTo keeps
+			// capture frames in sync (a popped h1 frame writes its field).
+			if start && isH1H6(tn) {
+				popUntilScope(scopeButton, "p")
+				if len(elemStack) > 0 && isH1H6(elemStack[len(elemStack)-1]) {
+					popElemTo(len(elemStack) - 1)
+				}
+			}
+			if len(capStack) > 0 {
+				if tn == "script" || tn == "style" {
 					if start {
 						capSkip, capSkipDepth = tn, 1
 					}
@@ -193,25 +343,25 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				skipTag, skipDepth = tn, 1
 				continue
 			}
+			// Track open elements (void and self-closing tags never stay
+			// open) for the h1 rule above and end-tag mirroring below.
+			if start && !isVoidElem(tn) {
+				elemStack = append(elemStack, tn)
+			}
 			selfClosing := !start
 			switch tn {
 			case "title":
-				if capTag != "" && capTag != "title" {
-					break // a different capture is active: transparent content
-				}
+				// No "transparent content" skip: a <title> inside an active
+				// h1 capture is a real element per the DOM walk (h1 is not
+				// RCDATA), so it starts its own frame; text feeds both.
+				// (<title> inside <title> can't happen: the tokenizer treats
+				// title content as RCDATA.)
 				if info.Title == "" && !selfClosing {
-					capTag, capDepth = "title", 1
-					capBuf.Reset()
-					capPendingSpace = false
+					capStack = append(capStack, &capFrame{tag: "title", elemDepth: len(elemStack)})
 				}
 			case "h1":
-				if capTag != "" && capTag != "h1" {
-					break // a different capture is active: transparent content
-				}
 				if info.H1 == "" && !selfClosing {
-					capTag, capDepth = "h1", 1
-					capBuf.Reset()
-					capPendingSpace = false
+					capStack = append(capStack, &capFrame{tag: "h1", elemDepth: len(elemStack)})
 				}
 			case "meta":
 				readMetaAttrs(z, info)
@@ -305,10 +455,38 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				}
 				continue
 			}
-			if capTag != "" && tn == capTag {
-				capDepth--
-				if capDepth == 0 {
-					flushCap()
+			// End-tag handling mirrors x/net's inBodyIM on elemStack; popElemTo
+			// keeps capture frames in sync (outermost-writes).
+			switch {
+			case tn == "br":
+				// x/net treats </br> as <br>: no stack change.
+			case tn == "p":
+				popUntilScope(scopeButton, "p")
+			case isH1H6(tn):
+				// No implied end tags, no scope pre-check (x/net popUntil).
+				popUntilScope(scopeDefault, "h1", "h2", "h3", "h4", "h5", "h6")
+			case tn == "li":
+				popUntilScope(scopeListItem, "li")
+			case tn == "dd" || tn == "dt":
+				popUntilScope(scopeDefault, tn)
+			case isScopeCloser(tn):
+				// address..ul case (x/net inBodyIM): implied end tags,
+				// then popUntil in default scope.
+				genImpliedEnds()
+				popUntilScope(scopeDefault, tn)
+			default:
+				// inBodyEndTagOther approximation: walk down from the top;
+				// stop at the first special element (formatting-element
+				// adoption-agency cases are out of scope — see the fuzzer
+				// skip list).
+				for i := len(elemStack) - 1; i >= 0; i-- {
+					if elemStack[i] == tn {
+						popElemTo(i)
+						break
+					}
+					if isSpecialElem(elemStack[i]) {
+						break
+					}
 				}
 			}
 		default:
@@ -319,10 +497,14 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 	}
 done:
 	flushTextRun() // EOF ends the final text run
-	// Unclosed title/h1 at EOF: html.Parse auto-closes them, so flush.
-	if capTag != "" {
-		flushCap()
+	// Unclosed title/h1 at EOF: html.Parse auto-closes them, so flush —
+	// outermost first, mirroring the DOM walk's pre-order visit (a later
+	// same-tag frame's write is suppressed by the info-field guard in
+	// flushCapFrame once the outer frame has written).
+	for i := range capStack {
+		flushCapFrame(capStack[i])
 	}
+	capStack = nil
 	info.WordCount = words // body text itself is never stored — only this count
 	// IG2: SimHash fingerprint for near-duplicate detection.
 	if textBuf.Len() > 0 {

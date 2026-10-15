@@ -511,12 +511,12 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 					continue
 				}
 			} else if skipTag != "" {
-				if tn == skipTag && start {
+				if tn == skipTag && effStart {
 					skipDepth++
 				}
 				continue
 			} else if capSkip != "" {
-				if tn == capSkip && start {
+				if tn == capSkip && effStart {
 					capSkipDepth++
 				}
 				continue
@@ -531,19 +531,30 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				}
 			}
 			if len(capStack) > 0 {
+				// skipEnters: the tree builder ignores the self-closing
+				// flag on HTML elements, so <script/> OPENS a script
+				// (raw text until </script> or EOF). Foreign <svg/>
+				// respects self-closing, so it does not open.
+				skipEnters := start || tn != "svg"
 				if tn == "script" || tn == "style" {
-					if start {
+					if skipEnters {
 						capSkip, capSkipDepth = tn, 1
 					}
 					continue
 				} else if isSkipTag(tn) {
-					if start {
+					if skipEnters {
 						capSkip, capSkipDepth = tn, 1
 					}
 					continue
 				}
-			} else if isSkipTag(tn) && start {
+			} else if isSkipTag(tn) && (start || tn != "svg") {
 				skipTag, skipDepth = tn, 1
+				// A self-closing HTML skip tag (<script/>) leaves the
+				// element open in the tree builder — track it on elemStack
+				// for end-tag/h1-rule mirroring.
+				if !start {
+					elemStack = append(elemStack, tn)
+				}
 				continue
 			}
 			// Track open elements for the h1 rule above and end-tag mirroring

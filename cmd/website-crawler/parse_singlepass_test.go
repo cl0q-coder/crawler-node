@@ -237,6 +237,12 @@ var differentialCorpusQ5 = map[string]string{
 	// Single-pass no longer flushes the text run for DoctypeToken
 	// (comments still split, as comment nodes).
 	"q5-doctype-ignored": `0<!DOCTYPE>0`,
+	// Q5 fuzz regression: self-closing <script/> — the tree builder
+	// ignores the self-closing flag on HTML elements, so <script/> OPENS
+	// a script (raw text until </script> or EOF); only foreign <svg/>
+	// respects self-closing. Single-pass now enters the skip region for
+	// self-closing HTML skip tags (and tracks the open element).
+	"q5-selfclose-script": `<script/>0`,
 }
 
 func init() {

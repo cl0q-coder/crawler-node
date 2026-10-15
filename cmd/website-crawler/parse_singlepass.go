@@ -302,9 +302,16 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				accumFrame(capStack[i], data)
 			}
 		case html.StartTagToken, html.SelfClosingTagToken:
-			flushTextRun() // element boundary ends the text run
 			rawName, _ := z.TagName()
 			tn := strings.ToLower(string(rawName))
+			// Document-structure tags never create text-node boundaries:
+			// duplicate html/head/body starts are ignored by the tree
+			// builder (attributes merged at most), and text around them is
+			// relocated into the body, merging runs the tokenizer splits
+			// (fuzzer-found: "0<head>0" is one DOM text node).
+			if tn != "html" && tn != "head" && tn != "body" {
+				flushTextRun() // element boundary ends the text run
+			}
 			start := tt == html.StartTagToken
 			if skipTag != "" {
 				if tn == skipTag && start {
@@ -434,9 +441,13 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				}
 			}
 		case html.EndTagToken:
-			flushTextRun() // element boundary ends the text run
 			rawName, _ := z.TagName()
 			tn := strings.ToLower(string(rawName))
+			// As with start tags, </html></head></body> never split text
+			// nodes (text after them is reprocessed into the body).
+			if tn != "html" && tn != "head" && tn != "body" {
+				flushTextRun() // element boundary ends the text run
+			}
 			if skipTag != "" {
 				if tn == skipTag {
 					skipDepth--

@@ -179,6 +179,13 @@ var differentialCorpusQ5 = map[string]string{
 	"q5-h1-nest-through-a": `<H1>0<A><H1>0`,
 	"q5-h1-nest-p":         `<h1>0<p><h1>1</h1>2</h1>`,
 	"q5-h1-nest-h2":        `<h1>0<h2>1</h2>2</h1>`,
+	// Q5 fuzz regression: html/head/body tags never create text-node
+	// boundaries — duplicates are ignored by the tree builder and text
+	// around them relocates into the body, merging into one text node.
+	"q5-struct-head":   `0<heAd>0`,
+	"q5-struct-body":   `<body>0<body>0`,
+	"q5-struct-body-e": `<body>0</body>0`,
+	"q5-struct-html":   `0<html>0</html>0`,
 }
 
 func init() {

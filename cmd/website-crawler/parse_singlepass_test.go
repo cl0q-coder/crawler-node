@@ -226,6 +226,11 @@ var differentialCorpusQ5 = map[string]string{
 	// deferred to Claude.
 	"q5-ignored-endtag-utf8": "<Bod\x90>0</Bod\xe7>0",
 	"q5-ignored-endtag-div":  "<DIV\xff>0</div>0",
+	// Q5 fuzz regression: "<A><A></A>0</A>0" — an <a> start tag with `a`
+	// already open runs the adoption agency; with no special elements
+	// between, the open `a` is simply closed (sibling-ized), so the text
+	// merges. Single-pass pops to the open `a` in that simple case.
+	"q5-anchor-sibling": `<A><A></A>0</A>0`,
 }
 
 func init() {

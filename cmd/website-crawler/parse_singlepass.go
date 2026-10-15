@@ -554,6 +554,30 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			// <image> is rewritten to <img> (void) by the tree builder.
 			if effStart && !isVoidElem(tn) && tn != "html" && tn != "head" &&
 				tn != "body" && tn != "image" {
+				// <a> start tag with `a` already open: x/net runs the
+				// adoption agency. Simple case (no special elements
+				// between the open `a` and the top): pop to the `a`
+				// (fuzzer-found: "<A><A></A>0</A>0" — without this the two
+				// `a`s nest and the text runs split). Complex reparenting
+				// (special element between) is deferred — see the fuzzer
+				// skip list.
+				if tn == "a" {
+					for i := len(elemStack) - 1; i >= 0; i-- {
+						if elemStack[i] == "a" {
+							complex := false
+							for j := i + 1; j < len(elemStack); j++ {
+								if isSpecialElem(elemStack[j]) {
+									complex = true
+									break
+								}
+							}
+							if !complex {
+								popElemTo(i)
+							}
+							break
+						}
+					}
+				}
 				elemStack = append(elemStack, tn)
 			}
 			switch tn {

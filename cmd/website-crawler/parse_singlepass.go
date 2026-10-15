@@ -19,9 +19,11 @@ package main
 //     until the matching end tag. html.Tokenizer already treats
 //     script/style/title as raw text, mirroring the parser's RCDATA handling,
 //     so title text containing '<' behaves the same (cleanTitle cuts at '<').
-//   - Word count and SimHash text are accumulated per text token, mirroring
-//     the per-text-node accounting of the DOM walk (a text run split across
-//     two tokens counts the same as two adjacent text nodes).
+//   - Word count and SimHash text are accumulated per maximal text run
+//     (adjacent text tokens coalesced into one feed), mirroring the DOM walk:
+//     the tree builder merges adjacent character tokens into a single text
+//     node, while the tokenizer can split a run (truncated tag at EOF). Any
+//     tag token or skipped text ends the run, matching DOM node boundaries.
 //   - title/h1 text: textOf() concatenates descendant text with the
 //     pendingSpace collapse (skipping script/style descendants only); the
 //     capture below reproduces that collapse while ALSO feeding the same text
@@ -55,6 +57,16 @@ func isSkipTag(tn string) bool {
 	return false
 }
 
+// dropNUL matches html.Parse: the tree builder ignores U+0000 character
+// tokens, while html.Tokenizer passes NUL bytes through in text tokens.
+// Strip them so both paths see identical text (found by FuzzParseSinglePass).
+func dropNUL(s string) string {
+	if strings.IndexByte(s, 0) < 0 {
+		return s
+	}
+	return strings.ReplaceAll(s, "\x00", "")
+}
+
 // parseHTMLSinglePass parses r (already transcoded to UTF-8) in one tokenizer
 // pass, filling the same info fields parseHTMLInfo fills from the DOM.
 func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
@@ -70,6 +82,21 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 		if textBuf.Len() < 32768 {
 			textBuf.WriteString(data)
 			textBuf.WriteByte(' ')
+		}
+	}
+	// textRun coalesces adjacent text tokens into a single feedText call.
+	// The DOM walk sees one text node per maximal character run (the tree
+	// builder merges adjacent character tokens), but the tokenizer can split
+	// a run across two text tokens (e.g. "0</" -> "0" + "</" when a tag is
+	// truncated at EOF — found by FuzzParseSinglePass). Feeding per token
+	// would double-count a word straddling the split and skew the SimHash
+	// text, so the run is buffered and fed whole. Any tag token or skipped
+	// text ends the run, matching DOM node boundaries.
+	var textRun strings.Builder
+	flushTextRun := func() {
+		if textRun.Len() > 0 {
+			feedText(textRun.String())
+			textRun.Reset()
 		}
 	}
 
@@ -108,24 +135,27 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 		tt := z.Next()
 		switch tt {
 		case html.ErrorToken:
+			flushTextRun()
 			goto done
 		case html.TextToken:
 			if skipTag != "" || capSkip != "" {
 				// Inside a skipped subtree: the DOM walk never sees this text.
+				flushTextRun()
 				// Exception: script/style inside title/h1 is excluded from the
 				// title too (textOf), but noscript/template/svg text still
 				// counts toward the title — accumulate it into the capture.
 				if capTag != "" && (capSkip == "noscript" || capSkip == "template" || capSkip == "svg") {
-					accumCap(string(z.Text()), &capBuf, &capPendingSpace, capFlushSpace)
+					accumCap(dropNUL(string(z.Text())), &capBuf, &capPendingSpace, capFlushSpace)
 				}
 				continue
 			}
-			data := string(z.Text())
-			feedText(data)
+			data := dropNUL(string(z.Text()))
+			textRun.WriteString(data)
 			if capTag != "" {
 				accumCap(data, &capBuf, &capPendingSpace, capFlushSpace)
 			}
 		case html.StartTagToken, html.SelfClosingTagToken:
+			flushTextRun() // element boundary ends the text run
 			rawName, _ := z.TagName()
 			tn := strings.ToLower(string(rawName))
 			start := tt == html.StartTagToken
@@ -254,6 +284,7 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				}
 			}
 		case html.EndTagToken:
+			flushTextRun() // element boundary ends the text run
 			rawName, _ := z.TagName()
 			tn := strings.ToLower(string(rawName))
 			if skipTag != "" {
@@ -280,9 +311,14 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 					flushCap()
 				}
 			}
+		default:
+			// Comment/doctype tokens: in the DOM they are separate siblings
+			// between text nodes, so they end the text run.
+			flushTextRun()
 		}
 	}
 done:
+	flushTextRun() // EOF ends the final text run
 	// Unclosed title/h1 at EOF: html.Parse auto-closes them, so flush.
 	if capTag != "" {
 		flushCap()

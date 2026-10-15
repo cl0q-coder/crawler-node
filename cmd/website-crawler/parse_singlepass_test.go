@@ -202,6 +202,11 @@ var differentialCorpusQ5 = map[string]string{
 	"q5-nul-foreign-svg":  "<h1><svg>\x00",
 	"q5-nul-foreign-math": "<math>\x00</math>",
 	"q5-nul-html":         "<h1>a\x00b</h1>",
+	// Q5 fuzz regression: html/head/body starts are structurally ignored
+	// by the tree builder (attributes merged at most), so they must not
+	// hide an open h1 from the h1 rule's top-of-stack check.
+	"q5-struct-h1-body": `<h1>0<BodY><h1>0`,
+	"q5-struct-h1-head": `<h1>0<head><h1>0`,
 }
 
 func init() {

@@ -435,9 +435,14 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				skipTag, skipDepth = tn, 1
 				continue
 			}
-			// Track open elements (void and self-closing tags never stay
-			// open) for the h1 rule above and end-tag mirroring below.
-			if start && !isVoidElem(tn) {
+			// Track open elements for the h1 rule above and end-tag mirroring
+			// below. Void and self-closing tags never stay open; neither do
+			// html/head/body — the tree builder ignores duplicate starts
+			// (attributes merged at most), so they must not hide an h1 from
+			// the h1 rule's top check (fuzzer-found: "<h1>0<BodY><h1>0").
+			// <image> is rewritten to <img> (void) by the tree builder.
+			if start && !isVoidElem(tn) && tn != "html" && tn != "head" &&
+				tn != "body" && tn != "image" {
 				elemStack = append(elemStack, tn)
 			}
 			selfClosing := !start

@@ -245,10 +245,12 @@ func FuzzParseSinglePass(f *testing.F) {
 //     ends the text run at every end tag (WordCount/SimHash only).
 //  2. Table foster parenting merges text across table-family start tags,
 //     e.g. "0<table>0" is one DOM text node "00" (WordCount/SimHash only).
-//  3. Table foster parenting plus active-formatting reconstruction can
-//     DUPLICATE elements: e.g. "<table><a href=//0><table>0" yields two
-//     <a> elements in the DOM (OutboundLinkCount 2 vs 1). Reproducing this
-//     needs the full formatting-element reconstruction algorithm.
+//     3-4. Active-formatting reconstruction DUPLICATES elements: the tree
+//     builder clones unclosed formatting elements (a, b, i, ...) when
+//     text or block starts arrive — e.g. "<table><a href=//0><table>0"
+//     yields two <a> elements, and "<p><a href=//0><h1>0" reconstructs
+//     the <a> inside the h1 when its text arrives. Reproducing this needs
+//     the active-formatting list + reconstruction algorithm.
 //
 // Skipping keeps the fuzzer hunting NEW classes instead of re-reporting the
 // deferred ones. The deterministic differential test above does NOT skip:
@@ -269,9 +271,8 @@ func isKnownDeferredDivergence(doc string, diffs []string) bool {
 	if textOnly && (hasIgnoredEndTag(doc) || hasTableFosterShape(doc)) {
 		return true
 	}
-	// Class 3: element duplication via formatting reconstruction only
-	// happens in table foster-parenting shapes.
-	return countOnly && hasTableFosterShape(doc)
+	// Classes 3-4: element duplication via formatting reconstruction.
+	return countOnly && hasDuplicatedFormatting(doc)
 }
 
 // hasIgnoredEndTag reports whether doc contains an end tag with no matching
@@ -328,6 +329,71 @@ func hasTableFosterShape(doc string) bool {
 		}
 	}
 	return false
+}
+
+// isFormattingElem reports whether tn is an HTML formatting element — the
+// ones the tree builder tracks in its active-formatting list and may
+// reconstruct (duplicating them) when text or block starts arrive.
+func isFormattingElem(tn string) bool {
+	switch tn {
+	case "a", "b", "big", "code", "em", "font", "i", "nobr",
+		"s", "small", "strike", "strong", "tt", "u":
+		return true
+	}
+	return false
+}
+
+// hasDuplicatedFormatting reports whether the DOM built from doc contains
+// MORE formatting elements than the doc has start tags for — the exact
+// signature of active-formatting reconstruction (or adoption-agency)
+// duplication, which a tokenizer pass cannot reproduce without that
+// machinery. Self-closing tags count as creating an element, matching the
+// tree builder.
+func hasDuplicatedFormatting(doc string) bool {
+	starts := map[string]int{}
+	z := html.NewTokenizer(strings.NewReader(doc))
+	for {
+		tt := z.Next()
+		if tt == html.ErrorToken {
+			break
+		}
+		if tt == html.StartTagToken || tt == html.SelfClosingTagToken {
+			name, _ := z.TagName()
+			if tn := strings.ToLower(string(name)); isFormattingElem(tn) {
+				starts[tn]++
+			}
+		}
+	}
+	root, err := html.Parse(strings.NewReader(doc))
+	if err != nil {
+		return false
+	}
+	dup := false
+	var walk func(n *html.Node)
+	walk = func(n *html.Node) {
+		if dup {
+			return
+		}
+		if n.Type == html.ElementNode {
+			// Mirror parseHTMLInfo: these subtrees are skipped entirely.
+			switch n.Data {
+			case "script", "style", "noscript", "template", "svg":
+				return
+			}
+			if isFormattingElem(n.Data) {
+				starts[n.Data]--
+				if starts[n.Data] < 0 {
+					dup = true
+					return
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(root)
+	return dup
 }
 
 // BenchmarkParseDOM vs BenchmarkParseSinglePass: before/after for #274.

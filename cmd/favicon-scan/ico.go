@@ -60,6 +60,11 @@ func decodeICO(data []byte) (image.Image, error) {
 	}
 	payload := data[best.offset : best.offset+best.size]
 	if bytes.HasPrefix(payload, pngMagic) {
+		// Q4 (#283) bomb guard: a PNG entry's declared dimensions are
+		// trusted by image.Decode's allocator — screen them first.
+		if iconDimsTooBig(payload) {
+			return nil, fmt.Errorf("ico png entry: dimensions exceed %dpx cap", maxIconPixelDim)
+		}
 		img, _, err := image.Decode(bytes.NewReader(payload))
 		if err != nil {
 			return nil, fmt.Errorf("ico png entry: %w", err)
@@ -98,6 +103,13 @@ func decodeICOBMP(payload []byte, w, h int) (image.Image, error) {
 	}
 	if pw <= 0 || imgH <= 0 {
 		return nil, fmt.Errorf("ico bmp: bad dimensions %dx%d", pw, imgH)
+	}
+	// Q4 (#283) bomb guard: cap dimensions BEFORE the stride*imgH multiply
+	// below. Huge BMP headers (e.g. 2^31x2^31) overflowed `need` negative,
+	// bypassed the length check, and then panicked fatally inside
+	// image.NewNRGBA. 4096 keeps the worst-case alloc at 64 MiB.
+	if pw > maxIconPixelDim || imgH > maxIconPixelDim {
+		return nil, fmt.Errorf("ico bmp: dimensions %dx%d exceed %dpx cap", pw, imgH, maxIconPixelDim)
 	}
 	stride := ((pw*int(bpp) + 31) / 32) * 4
 	need := 40 + stride*imgH

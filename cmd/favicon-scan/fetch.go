@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"image"
@@ -168,9 +169,105 @@ func findIconLink(page []byte) string {
 	return href
 }
 
+// maxIconPixelDim caps decoded favicon dimensions (Q4 #283 bomb guard).
+// 4096x4096 NRGBA = 64 MiB worst case: far above any real favicon
+// (apple-touch-icon tops out at 180x180; large PNG icons are 512x512),
+// far below OOM/panic territory in image.NewNRGBA (which panics, fatally,
+// on huge dimensions instead of returning an error).
+const maxIconPixelDim = 4096
+
+// iconDimsTooBig reports whether data positively identifies itself as a
+// PNG, GIF, or JPEG whose declared dimensions exceed maxIconPixelDim.
+// Unknown/unparseable headers return false and let image.Decode decide.
+func iconDimsTooBig(data []byte) bool {
+	if w, h, ok := pngDims(data); ok {
+		return w > maxIconPixelDim || h > maxIconPixelDim
+	}
+	if w, h, ok := gifDims(data); ok {
+		return w > maxIconPixelDim || h > maxIconPixelDim
+	}
+	if w, h, ok := jpegDims(data); ok {
+		return w > maxIconPixelDim || h > maxIconPixelDim
+	}
+	return false
+}
+
+// pngDims reads PNG IHDR dimensions. ok=false unless the IHDR is present
+// and well-formed.
+func pngDims(data []byte) (w, h int, ok bool) {
+	if len(data) < 24 || !bytes.HasPrefix(data, pngMagic) {
+		return 0, 0, false
+	}
+	if binary.BigEndian.Uint32(data[8:12]) != 13 || string(data[12:16]) != "IHDR" {
+		return 0, 0, false
+	}
+	w = int(binary.BigEndian.Uint32(data[16:20]))
+	h = int(binary.BigEndian.Uint32(data[20:24]))
+	return w, h, true
+}
+
+// gifDims reads GIF logical-screen dimensions. ok=false unless the header
+// is present.
+func gifDims(data []byte) (w, h int, ok bool) {
+	if len(data) < 10 {
+		return 0, 0, false
+	}
+	if m := string(data[:6]); m != "GIF87a" && m != "GIF89a" {
+		return 0, 0, false
+	}
+	w = int(binary.LittleEndian.Uint16(data[6:8]))
+	h = int(binary.LittleEndian.Uint16(data[8:10]))
+	return w, h, true
+}
+
+// jpegDims scans JPEG markers for the first SOF segment and returns its
+// dimensions. ok=false when no SOF is found or the header walk hits
+// anything malformed — the caller then lets image.Decode decide.
+func jpegDims(data []byte) (w, h int, ok bool) {
+	if len(data) < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+		return 0, 0, false
+	}
+	off := 2
+	for off+4 <= len(data) {
+		if data[off] != 0xFF {
+			return 0, 0, false
+		}
+		marker := data[off+1]
+		off += 2
+		// Standalone markers carry no length field.
+		if marker == 0xD8 || marker == 0xD9 || marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7) {
+			continue
+		}
+		if off+2 > len(data) {
+			return 0, 0, false
+		}
+		segLen := int(binary.BigEndian.Uint16(data[off : off+2]))
+		if segLen < 2 || off+segLen > len(data) {
+			return 0, 0, false
+		}
+		// SOF0-SOF15 except the non-image markers C4/C8/CC.
+		if marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
+			if segLen < 7 {
+				return 0, 0, false
+			}
+			h = int(binary.BigEndian.Uint16(data[off+3 : off+5]))
+			w = int(binary.BigEndian.Uint16(data[off+5 : off+7]))
+			return w, h, true
+		}
+		off += segLen
+	}
+	return 0, 0, false
+}
+
 // decodeIconImage decodes PNG/JPEG/GIF via stdlib, plus ICO (PNG-in-ICO or
 // 32/24-bit BMP entries) via the minimal decoder in ico.go.
 func decodeIconImage(data []byte) (image.Image, string, error) {
+	// Q4 (#283) bomb guard: reject absurd declared dimensions BEFORE the
+	// stdlib decoders allocate pixel buffers — huge dims panic fatally
+	// inside image.NewNRGBA (or OOM the process), they don't error.
+	if iconDimsTooBig(data) {
+		return nil, "", fmt.Errorf("icon dimensions exceed %dpx cap", maxIconPixelDim)
+	}
 	if img, format, err := image.Decode(bytes.NewReader(data)); err == nil {
 		return img, format, nil
 	}

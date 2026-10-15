@@ -166,6 +166,24 @@ jobs:
           fi
           echo "no committed binaries found"
 
+  # Track Q rung Q4 (#283): run the favicon decode fuzzers long in CI. The
+  # seed corpus (valid + malformed + bomb inputs) already runs under
+  # `go test ./...` in the `test` job; this gives the mutator a bounded
+  # window to hunt new crashes on every push/PR. Separate job from Q5's
+  # `fuzz` job (PR #295) to avoid merge conflicts — consolidate later.
+  fuzz-favicon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: fuzz FuzzDecodeIcon (2 min)
+        run: go test -run='^$' -fuzz='^FuzzDecodeIcon$' -fuzztime=120s ./cmd/favicon-scan/
+      - name: fuzz FuzzDecodeICO (2 min)
+        run: go test -run='^$' -fuzz='^FuzzDecodeICO$' -fuzztime=120s ./cmd/favicon-scan/
+
   timing:
     name: ci wall-time
     runs-on: ubuntu-latest

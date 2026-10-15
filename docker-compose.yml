@@ -16,6 +16,12 @@ x-db-url: &db_url "postgres://cl0q:${DB_PASSWORD:?set DB_PASSWORD in .env}@db:54
 x-node-env: &node_env
   DATABASE_URL: *db_url
   CL0Q_NODE_ID: "${CL0Q_NODE_ID:?set CL0Q_NODE_ID in .env (the node id you enrolled with)}"
+  # Footprint caps (internal/footprint): empty/unset = compiled defaults
+  # (1M domains, 1M pages, 20GB database). Set NODE_MAX_DB_GB *below* your
+  # disk size — the 20GB default cannot save a smaller disk.
+  NODE_MAX_DB_GB: "${NODE_MAX_DB_GB:-}"
+  NODE_MAX_DOMAINS: "${NODE_MAX_DOMAINS:-}"
+  NODE_MAX_PAGES: "${NODE_MAX_PAGES:-}"
 
 x-svc: &svc
   build: .

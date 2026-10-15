@@ -86,6 +86,15 @@ node's own Postgres, unreachable from outside). If you enrolled with the
 command above, you don't need to set `NODE_TOKEN` or `CL0Q_NODE_ID` — the
 node reads them from `cl0q-node.json`.
 
+### Disk safety
+
+A node with a full disk stops dead. Set `NODE_MAX_DB_GB` in `.env` to
+**below your disk size** (e.g. `10` on a 25 GB droplet) — the 20 GB default
+cannot save a smaller disk. When the cap is hit the node just pauses
+discovery of new domains while it keeps crawling and forwarding what it
+has, and logs a clear "at cap" message. Small droplets work fine: 1 GB RAM
+is enough as long as the box has 2 GB+ of swap for the initial build.
+
 ## 3. Preflight
 
 ```sh

@@ -11,8 +11,10 @@ package main
 // token once and allocates ~one small string per tag.
 //
 // Equivalence notes (verified by TestParseSinglePassDifferential):
-//   - Tag dispatch lowercases with strings.ToLower, matching html.Parse's
-//     lowercased n.Data. Attribute keys are compared case-insensitively,
+//   - Tag dispatch lowercases ASCII-only (lowerTagASCII), matching
+//     x/net TagName's ASCII-only lowercasing of n.Data. strings.ToLower
+//     would corrupt invalid UTF-8 bytes to U+FFFD, collapsing distinct
+//     tag names the tree builder treats as different. Attribute keys are compared case-insensitively,
 //     exactly like readMeta and the link/anchor handling in parseHTMLInfo.
 //   - Skipped subtrees (script/style/noscript/template/svg): the DOM walk
 //     returns before visiting children; here a depth counter skips tokens
@@ -49,6 +51,22 @@ import (
 )
 
 // isSkipTag reports the subtrees the DOM walk never descends into.
+// lowerTagASCII lowercases ASCII A-Z bytes, preserving all other bytes
+// exactly. strings.ToLower would replace invalid UTF-8 bytes with U+FFFD,
+// collapsing distinct tag names (e.g. "bod\x90" vs "bod\xe7" both become
+// "bod\uFFFD") — but x/net's TagName lowercases ASCII-only and the tree
+// builder compares the raw bytes, so we must too.
+func lowerTagASCII(b []byte) string {
+	out := make([]byte, len(b))
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		out[i] = c
+	}
+	return string(out)
+}
+
 func isSkipTag(tn string) bool {
 	switch tn {
 	case "script", "style", "noscript", "template", "svg":
@@ -353,6 +371,59 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 		}
 		return false
 	}
+	// inScope reports whether any of tags is in scope, using the same
+	// scope-stop logic as popUntilScope but without popping.
+	inScope := func(sc int, tags ...string) bool {
+		for i := len(elemStack) - 1; i >= 0; i-- {
+			t := elemStack[i]
+			for _, m := range tags {
+				if t == m {
+					return true
+				}
+			}
+			if isScopeStop(t) || (sc == scopeButton && t == "button") ||
+				(sc == scopeListItem && (t == "ol" || t == "ul")) {
+				return false
+			}
+		}
+		return false
+	}
+	// endTagActs reports whether an end tag actually does something in the
+	// tree builder (vs being dropped as a parse error). Ignored end tags
+	// create no DOM text boundary — the text on either side merges into a
+	// single node — so the text run must not end there either
+	// (fuzzer-found: "<Bod\x90>0</Bod\xe7>0" merges to one word).
+	endTagActs := func(tn string) bool {
+		switch {
+		case tn == "html" || tn == "head" || tn == "body":
+			return false
+		case tn == "br":
+			return true // x/net treats </br> as a <br> start tag
+		case tn == "p":
+			return true // auto-creates p when absent — always a boundary
+		case isH1H6(tn):
+			return inScope(scopeDefault, "h1", "h2", "h3", "h4", "h5", "h6")
+		case tn == "li":
+			return inScope(scopeListItem, "li")
+		case tn == "dd" || tn == "dt":
+			return inScope(scopeDefault, tn)
+		case isScopeCloser(tn):
+			return inScope(scopeDefault, tn)
+		default:
+			// inBodyEndTagOther: acts iff tn is found walking down
+			// before the first special element; otherwise ignored.
+			for i := len(elemStack) - 1; i >= 0; i-- {
+				if elemStack[i] == tn {
+					return true
+				}
+				if isSpecialElem(elemStack[i]) {
+					return false
+				}
+			}
+			return false
+		}
+	}
+
 	// Inside a title/h1 capture, textOf skips script/style descendants only
 	// (noscript/template/svg text still counts toward the title). capSkip
 	// suppresses those tokens for the word/SimHash path but not the capture.
@@ -389,7 +460,7 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			}
 		case html.StartTagToken, html.SelfClosingTagToken:
 			rawName, _ := z.TagName()
-			tn := strings.ToLower(string(rawName))
+			tn := lowerTagASCII(rawName)
 			// Document-structure tags never create text-node boundaries:
 			// duplicate html/head/body starts are ignored by the tree
 			// builder (attributes merged at most), and text around them is
@@ -571,10 +642,11 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			}
 		case html.EndTagToken:
 			rawName, _ := z.TagName()
-			tn := strings.ToLower(string(rawName))
-			// As with start tags, </html></head></body> never split text
-			// nodes (text after them is reprocessed into the body).
-			if tn != "html" && tn != "head" && tn != "body" {
+			tn := lowerTagASCII(rawName)
+			// Only end tags the tree builder acts on end the text run. An
+			// ignored end tag (parse error, token dropped) creates no DOM
+			// text boundary — the text on either side merges into one node.
+			if endTagActs(tn) {
 				flushTextRun() // element boundary ends the text run
 			}
 			// Foreign-content depth tracks the tree builder even inside

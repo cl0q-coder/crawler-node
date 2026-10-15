@@ -215,6 +215,17 @@ var differentialCorpusQ5 = map[string]string{
 	// yields H1="0" (outer textOf "<0" truncates to ""). Single-pass keeps
 	// popped inner frames as fallback candidates for this.
 	"q5-h1-empty-overwrite": `<h1><<A><h1>0<h1>`,
+	// Q5 fuzz regression: ignored end tags create no DOM text boundary.
+	// "<Bod\x90>0</Bod\xe7>0" — the end tag's raw bytes don't match the
+	// open element (x/net TagName lowercases ASCII-only, preserving
+	// invalid UTF-8; strings.ToLower would corrupt them to U+FFFD and
+	// falsely match), so the token is dropped and the text merges.
+	// Single-pass now flushes the text run only for end tags the tree
+	// builder acts on (endTagActs). This also fixes the simple #279-3
+	// case "0</A>0"; misnested formatting elements (adoption agency) stay
+	// deferred to Claude.
+	"q5-ignored-endtag-utf8": "<Bod\x90>0</Bod\xe7>0",
+	"q5-ignored-endtag-div":  "<DIV\xff>0</div>0",
 }
 
 func init() {
@@ -324,10 +335,10 @@ func hasIgnoredEndTag(doc string) bool {
 			return false
 		case html.StartTagToken:
 			name, _ := z.TagName()
-			stack = append(stack, strings.ToLower(string(name)))
+			stack = append(stack, lowerTagASCII(name))
 		case html.EndTagToken:
 			name, _ := z.TagName()
-			tn := strings.ToLower(string(name))
+			tn := lowerTagASCII(name)
 			found := -1
 			for i := len(stack) - 1; i >= 0; i-- {
 				if stack[i] == tn {
@@ -395,7 +406,7 @@ func hasDuplicatedFormatting(doc string) bool {
 		}
 		if tt == html.StartTagToken || tt == html.SelfClosingTagToken {
 			name, _ := z.TagName()
-			if tn := strings.ToLower(string(name)); isFormattingElem(tn) {
+			if tn := lowerTagASCII(name); isFormattingElem(tn) {
 				starts[tn]++
 			}
 		}

@@ -2187,11 +2187,27 @@ const upsertTail = ` ON CONFLICT (domain) DO UPDATE SET
 	og_title=EXCLUDED.og_title, og_image=EXCLUDED.og_image, twitter_card=EXCLUDED.twitter_card,
 	page_language=EXCLUDED.page_language, server_header=EXCLUDED.server_header,
 	fetch_error=EXCLUDED.fetch_error, etag=EXCLUDED.etag, last_modified=EXCLUDED.last_modified,
+	-- #297 follow-up (Q6 #283): refresh the fingerprint + sitemap families on
+	-- conflict, mirroring the row-by-row fallback upsert's own SET. Each is a
+	-- real INSERT column (upsertHead) — the #193/Q6 NULL-on-conflict class.
+	-- 304s never reach this upsert (they take batch304Touch below, option (a)),
+	-- so a zero/empty fingerprint here is honest recrawl data, never a clobber.
+	simhash=EXCLUDED.simhash, simhash_b0=EXCLUDED.simhash_b0, simhash_b1=EXCLUDED.simhash_b1,
+	simhash_b2=EXCLUDED.simhash_b2, simhash_b3=EXCLUDED.simhash_b3, duplicate_of=EXCLUDED.duplicate_of,
+	sitemap_urls=EXCLUDED.sitemap_urls, sitemap_lastmod=EXCLUDED.sitemap_lastmod,
 	crawled_at=now(),
 	-- This crawler re-authored the row, so it now owns it. Reset provenance (NULL); otherwise a row
 	-- first created by node 'x' keeps source_node='x' forever and a "purge a bad node"
 	-- DELETE WHERE source_node='x' would nuke rows this crawler now owns.
 	source_node=NULL`
+
+// batch304Touch — the 304 path in flushBatchTx (option (a) of the #297
+// SimHash-refresh spec): a conditional-GET 304 never enters the multi-row
+// upsert, so it can never clobber simhash/duplicate_of with a zero/empty
+// fingerprint. It takes this separate statement, which refreshes crawled_at
+// and nothing else — the stored content is still current, so we advance the
+// recrawl clock without rewriting the row.
+const batch304Touch = `UPDATE website_info SET crawled_at = now() WHERE domain = ANY($1)`
 
 // batchWriteTimeout bounds a single batch write (Begin+Exec+Commit) as a unit — see flushBatch.
 // Generous: a healthy batch commits in <1s; this only trips on a genuinely wedged connection (which
@@ -2390,8 +2406,11 @@ func flushBatchTx(ctx context.Context, db *sql.DB, batch []crawlOut, emitEnabled
 
 	// 2b) 304 Not Modified → content unchanged; refresh crawled_at only, leave the row intact.
 	//     (On the local spool DB the row usually isn't present → a harmless 0-row update.)
+	//     batch304Touch is the separate option-(a) statement: 304s never enter
+	//     the multi-row upsert above, so a zero/empty fingerprint can never
+	//     clobber the stored simhash/duplicate_of.
 	if len(notmod) > 0 {
-		if _, err := tx.ExecContext(ctx, `UPDATE website_info SET crawled_at = now() WHERE domain = ANY($1)`, pq.Array(notmod)); err != nil {
+		if _, err := tx.ExecContext(ctx, batch304Touch, pq.Array(notmod)); err != nil {
 			return 0, err
 		}
 	}

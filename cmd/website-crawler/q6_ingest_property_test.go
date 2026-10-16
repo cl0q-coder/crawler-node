@@ -1,7 +1,9 @@
 package main
 
-// Track Q rung Q6 (#283): ingest/upsert property tests — tests-only, no
-// production code changes (the ingest path is Claude Code's trust lane).
+// Track Q rung Q6 (#283): ingest/upsert property tests, plus the #297
+// follow-up FIX (batch upsertTail now refreshes the SimHash + sitemap
+// families on conflict; the 304 path is pinned to option (a) — a separate
+// crawled_at-only touch that never enters the upsert).
 //
 // Three targets, mirroring the Q4/Q5 structure:
 //
@@ -24,15 +26,21 @@ package main
 // is edited, the extraction or the property fails loudly instead of silently
 // testing a stale copy.
 //
-// Q6 FINDING (reported on #283, not fixed — ingest fixes hold for Claude):
-// the BATCH upsertTail does NOT refresh simhash/simhash_b0-b3/duplicate_of/
+// Q6 FINDING (reported on #283; FIXED by the #297 follow-up): the BATCH
+// upsertTail did NOT refresh simhash/simhash_b0-b3/duplicate_of/
 // sitemap_urls/sitemap_lastmod on conflict, while the row-by-row FALLBACK
-// prepared upsert DOES. So a re-crawl flushed through the batch path keeps
+// prepared upsert DID — so a re-crawl flushed through the batch path kept
 // its ORIGINAL first-crawl fingerprint (and duplicate_of) forever, and the
 // HE-4 "upsert overwrites the stored fingerprints" comments (flushBatchTx,
-// he4FetchVerdicts) are wrong for the batch path. TestQ6BatchUpsertTailGaps
-// pins the current gap set; if the gap set changes in either direction the
-// test fails and the allowlist must be revisited.
+// he4FetchVerdicts) were wrong for the batch path. The fix adds the
+// fingerprint + sitemap families to upsertTail's SET (mirroring the
+// fallback's own SET; each a real INSERT column — the #193 bug class) and
+// pins the 304 path to option (a): 304s take the separate crawled_at-only
+// batch304Touch and never enter the upsert, so a zero/empty fingerprint can
+// never clobber the stored one. q6BatchKnownGaps shrank to empty; only the
+// intentionally-static columns stay unrefreshed on conflict.
+// TestQ6BatchUpsertTailGaps pins the current gap set; if the gap set changes
+// in either direction the test fails and the allowlist must be revisited.
 
 import (
 	"go/ast"
@@ -355,14 +363,15 @@ func TestQ6BatchUpsertHeadColumns(t *testing.T) {
 	}
 }
 
-// Columns the batch ON CONFLICT SET is KNOWN not to refresh (Q6 finding,
-// reported on #283 — ingest fixes hold for Claude). The test FAILS if this
-// set changes in either direction, so a fix (or a new omission) forces a
-// human to revisit the allowlist instead of silently changing behavior.
-var q6BatchKnownGaps = []string{
-	"simhash", "simhash_b0", "simhash_b1", "simhash_b2", "simhash_b3",
-	"duplicate_of", "sitemap_urls", "sitemap_lastmod",
-}
+// Columns the batch ON CONFLICT SET was KNOWN not to refresh (Q6 finding,
+// reported on #283): simhash/simhash_b0-b3/duplicate_of/sitemap_urls/
+// sitemap_lastmod. The #297 follow-up FIXED the gap — the batch upsertTail
+// now refreshes all of them from EXCLUDED.* (mirroring the row-by-row
+// fallback's SET) — so the known-gap set is EMPTY. The test still FAILS if
+// the missing set changes in either direction, so a fix (or a new omission)
+// forces a human to revisit the allowlist instead of silently changing
+// behavior.
+var q6BatchKnownGaps = []string{}
 
 // Columns intentionally not refreshed on conflict in EITHER path:
 // cumulative counters/flags, not per-crawl content.
@@ -397,8 +406,10 @@ func TestQ6BatchUpsertTailGaps(t *testing.T) {
 				"allowlist) — silent fingerprint/content freeze", m)
 		}
 	}
-	// Pin the reported gap: it must still be EXACTLY the known set. If a fix
-	// lands, this fails and the allowlist (and this comment) must be updated.
+	// Pin the reported gap: it must still be EXACTLY the known set (now
+	// empty — the #297 follow-up fixed it). If the gap set changes in either
+	// direction, this fails and the allowlist (and this comment) must be
+	// updated.
 	knownSet := q6Set(q6BatchKnownGaps)
 	for _, g := range q6BatchKnownGaps {
 		if assigned[g] {
@@ -622,6 +633,26 @@ func TestQ6TouchStmtContentSafe(t *testing.T) {
 	up := strings.ToUpper(q6StripSQLComments(sql))
 	if !strings.Contains(up, "WHERE DOMAIN = $1") {
 		t.Errorf("touchStmt lost its WHERE domain = $1 guard: %.120s", sql)
+	}
+}
+
+// The BATCH 304 statement (flushBatchTx step 2b, option (a) of the #297
+// spec): a conditional-GET 304 never reaches the multi-row upsert, so the
+// zero/empty fingerprint a notmod entry carries can never clobber the stored
+// simhash/duplicate_of. This separate statement must refresh crawled_at and
+// NOTHING else — the stored content is still current.
+func TestQ6Batch304TouchContentSafe(t *testing.T) {
+	assigned := q6SetAssignedCols(t, batch304Touch)
+	if len(assigned) != 1 || assigned[0] != "crawled_at" {
+		t.Errorf("batch304Touch SET assigns %v, want exactly [crawled_at] "+
+			"(304 path must never rewrite content/simhash columns)", assigned)
+	}
+	up := strings.ToUpper(q6StripSQLComments(batch304Touch))
+	if !strings.Contains(up, "WHERE DOMAIN = ANY($1)") {
+		t.Errorf("batch304Touch lost its WHERE domain = ANY($1) guard: %.120s", batch304Touch)
+	}
+	if strings.Contains(up, "EXCLUDED.") {
+		t.Errorf("batch304Touch references EXCLUDED — it must be a plain UPDATE, not an upsert: %.120s", batch304Touch)
 	}
 }
 

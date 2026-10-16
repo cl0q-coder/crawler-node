@@ -17,7 +17,7 @@ Nothing listens on a public port. Your node only makes outbound requests.
 ```sh
 git clone https://gitea.cl0q.com/chris/crawler-node && cd crawler-node
 docker compose build
-docker compose run --rm cl0q-node enroll --contact you@example.com --label "My Home Server"
+docker compose run --rm --entrypoint /usr/local/bin/cl0q-node node enroll --contact you@example.com --label "My Home Server"
 ```
 
 This calls cl0q's ingest server and enrolls you as a node. The server
@@ -147,7 +147,7 @@ cl0q (cl0qsearch@gmail.com) so your node id is retired.
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `preflight` ingest FAIL | Token rejected (expired/revoked) | `docker compose run --rm cl0q-node enroll` (rotates the token) |
+| `preflight` ingest FAIL | Token rejected (expired/revoked) | `docker compose run --rm --entrypoint /usr/local/bin/cl0q-node node enroll` (rotates the token) |
 | `CL0Q_NODE_ID is not set` | Enrol didn't run | Run step 1; check `cl0q-node.json` exists |
 | `invalid WORKERS=...` etc. | Bad setting in `.env` | The message names the knob and the allowed range — fix the value |
 | Node runs but sends nothing | DB or ingest unreachable | `docker compose logs node`, then `preflight` |

@@ -15,7 +15,9 @@ x-db-url: &db_url "postgres://cl0q:${DB_PASSWORD:?set DB_PASSWORD in .env}@db:54
 
 x-node-env: &node_env
   DATABASE_URL: *db_url
-  CL0Q_NODE_ID: "${CL0Q_NODE_ID:?set CL0Q_NODE_ID in .env (the node id you enrolled with)}"
+  # Optional: enroll creates these values, so they must not be mandatory
+  # before the first enroll runs (see docs/NODE_OPERATORS.md step 1).
+  CL0Q_NODE_ID: "${CL0Q_NODE_ID:-}"
   # Footprint caps (internal/footprint): empty/unset = compiled defaults
   # (1M domains, 1M pages, 20GB database). Set NODE_MAX_DB_GB *below* your
   # disk size — the 20GB default cannot save a smaller disk.
@@ -97,9 +99,9 @@ services:
     command: ["/usr/local/bin/cl0q-node", "-interval", "60s", "-batch", "100"]
     environment:
       LOCAL_DATABASE_URL: *db_url
-      CL0Q_NODE_ID: "${CL0Q_NODE_ID:?set CL0Q_NODE_ID in .env (the node id you enrolled with)}"
+      CL0Q_NODE_ID: "${CL0Q_NODE_ID:-}"
       INGEST_URL: "${INGEST_URL:-https://cl0q.com}"
-      NODE_TOKEN: "${NODE_TOKEN:?set NODE_TOKEN in .env (shown once when your node was enrolled)}"
+      NODE_TOKEN: "${NODE_TOKEN:-}"
 
 
   # One-shot self-check (NR4): DB, ingest+token, DNS, egress, netguard, robots.
@@ -113,6 +115,6 @@ services:
     environment:
       LOCAL_DATABASE_URL: *db_url
       INGEST_URL: "${INGEST_URL:-https://cl0q.com}"
-      NODE_TOKEN: "${NODE_TOKEN:?set NODE_TOKEN in .env}"
+      NODE_TOKEN: "${NODE_TOKEN:-}"
 volumes:
   pgdata: {}

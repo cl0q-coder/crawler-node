@@ -85,6 +85,7 @@ import (
 	"cl0q/internal/config"
 	"cl0q/internal/footprint"
 	"cl0q/internal/metrics"
+	"cl0q/internal/quality"
 	"cl0q/internal/simhash"
 	"cl0q/internal/sitemap"
 	"cl0q/internal/tunable"
@@ -736,7 +737,10 @@ func blDomainHit(host string) bool {
 func isBlacklisted(domain string, info *WebsiteInfo) (string, bool) {
 	blMu.RLock()
 	defer blMu.RUnlock()
-	if len(blDomains) == 0 && len(blWords) == 0 {
+	blFeedMu.RLock()
+	feedEmpty := len(blFeedDomains) == 0
+	blFeedMu.RUnlock()
+	if len(blDomains) == 0 && len(blWords) == 0 && feedEmpty {
 		return "", false
 	}
 	if blDomainHit(domain) {
@@ -750,7 +754,83 @@ func isBlacklisted(domain string, info *WebsiteInfo) (string, bool) {
 			return t, true
 		}
 	}
+	// K5 threat feeds: feed-sourced hosts are domain-kind only (exact apex +
+	// subdomains, same walk as blDomainHit). Provenance is returned so the
+	// labeled-sample precision measurement can attribute hits per feed.
+	if prov, hit := blFeedHit(domain); hit {
+		return "feed:" + prov, true
+	}
 	return "", false
+}
+
+// ---------------- K5 threat feeds (read-only, domain-kind only) ----------------
+//
+// Pluggable feed loader (feed -> normalized blocklist -> the existing matcher
+// above). Feeds are fetched on a refresh timer; a failed fetch keeps the last
+// good snapshot. Feed entries NEVER become keyword rules. Disabled by default:
+// with no feeds configured the matcher behaves exactly as before.
+var (
+	blFeedMu      sync.RWMutex
+	blFeedDomains map[string]string // normalized host -> feed name (provenance)
+)
+
+// mergeFeedBlacklist atomically installs one feed snapshot (domain-kind only).
+func mergeFeedBlacklist(doms map[string]string) {
+	blFeedMu.Lock()
+	blFeedDomains = doms
+	blFeedMu.Unlock()
+	log.Printf("blacklist feeds: %d domain(s) installed", len(doms))
+}
+
+// blFeedHit: host is an exact feed-listed domain or a subdomain of one.
+// Same parent-walk as blDomainHit: one map lookup per label.
+func blFeedHit(host string) (string, bool) {
+	blFeedMu.RLock()
+	defer blFeedMu.RUnlock()
+	for h := strings.TrimPrefix(strings.ToLower(host), "www."); h != ""; {
+		if prov, ok := blFeedDomains[h]; ok {
+			return prov, true
+		}
+		i := strings.IndexByte(h, '.')
+		if i < 0 {
+			break
+		}
+		h = h[i+1:]
+	}
+	return "", false
+}
+
+// feedRefresherFromEnv builds the K5 refresher from the environment:
+//
+//	BLACKLIST_FEEDS="name|https://feed-url,name2|https://other-url"
+//	BLACKLIST_FEED_REFRESH="6h" (default 6h, minimum 1m)
+
+// Empty BLACKLIST_FEEDS = disabled: the refresher carries no feeds and the
+// matcher behaves exactly as without K5.
+func feedRefresherFromEnv() *quality.Refresher {
+	spec := strings.TrimSpace(os.Getenv("BLACKLIST_FEEDS"))
+	interval := 6 * time.Hour
+	if s := strings.TrimSpace(os.Getenv("BLACKLIST_FEED_REFRESH")); s != "" {
+		if d, err := time.ParseDuration(s); err == nil && d >= time.Minute {
+			interval = d
+		} else {
+			log.Printf("blacklist feeds: bad BLACKLIST_FEED_REFRESH %q, using 6h", s)
+		}
+	}
+	if spec == "" {
+		return quality.NewRefresher(nil, interval)
+	}
+	var feeds []quality.Feed
+	for _, part := range strings.Split(spec, ",") {
+		kv := strings.SplitN(strings.TrimSpace(part), "|", 2)
+		if len(kv) != 2 || strings.TrimSpace(kv[0]) == "" || strings.TrimSpace(kv[1]) == "" {
+			log.Printf("blacklist feeds: skipping malformed entry %q (want name|url)", part)
+			continue
+		}
+		feeds = append(feeds, quality.NewURLFeed(strings.TrimSpace(kv[0]), strings.TrimSpace(kv[1])))
+	}
+	log.Printf("blacklist feeds: %d feed(s) configured, refresh %s", len(feeds), interval)
+	return quality.NewRefresher(feeds, interval)
 }
 
 func main() {
@@ -1076,6 +1156,20 @@ func main() {
 		defer t.Stop()
 		for range t.C {
 			loadBlacklist(db)
+		}
+	}()
+
+	// K5 threat feeds (disabled unless BLACKLIST_FEEDS is set): the refresher
+	// fetches on its own timer and we merge each snapshot into the matcher.
+	// Feed hits are domain-kind only and carry feed provenance in the term.
+	feedRefresher := feedRefresherFromEnv()
+	mergeFeedBlacklist(feedRefresher.Domains())
+	go feedRefresher.Start(context.Background())
+	go func() { // merge refreshed snapshots on the blacklist cadence
+		t := time.NewTicker(60 * time.Second)
+		defer t.Stop()
+		for range t.C {
+			mergeFeedBlacklist(feedRefresher.Domains())
 		}
 	}()
 

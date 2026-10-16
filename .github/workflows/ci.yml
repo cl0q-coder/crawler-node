@@ -200,10 +200,31 @@ jobs:
       - name: fuzz FuzzParseSinglePass (5 min)
         run: go test -run='^$' -fuzz='^FuzzParseSinglePass$' -fuzztime=300s ./cmd/website-crawler/
 
+  # Track Q rung Q6 (#283): run the ingest/upsert property fuzzers long in CI.
+  # The seed corpus already runs under `go test ./...` in the `test` job;
+  # this gives the mutator a bounded window to hunt new divergences on every
+  # push/PR. Separate job from Q5's `fuzz` job and Q4's `fuzz-favicon` job.
+  fuzz-ingest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: fuzz FuzzQ6SortedKeys (90s)
+        run: go test -run='^$' -fuzz='^FuzzQ6SortedKeys$' -fuzztime=90s ./cmd/website-crawler/
+      - name: fuzz FuzzQ6SimhashBlocks (90s)
+        run: go test -run='^$' -fuzz='^FuzzQ6SimhashBlocks$' -fuzztime=90s ./cmd/website-crawler/
+      - name: fuzz FuzzQ6NsSanitize (90s)
+        run: go test -run='^$' -fuzz='^FuzzQ6NsSanitize$' -fuzztime=90s ./cmd/website-crawler/
+      - name: fuzz FuzzQ6ChangeObserved304 (90s)
+        run: go test -run='^$' -fuzz='^FuzzQ6ChangeObserved304$' -fuzztime=90s ./cmd/website-crawler/
+
   timing:
     name: ci wall-time
     runs-on: ubuntu-latest
-    needs: [test, test-race, schema, docker, supply-chain, no-binaries, fuzz]
+    needs: [test, test-race, schema, docker, supply-chain, no-binaries, fuzz, fuzz-favicon, fuzz-ingest]
     if: always()
     permissions:
       contents: read

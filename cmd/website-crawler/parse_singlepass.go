@@ -279,6 +279,23 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 		}
 		return false
 	}
+	// isForeignEndBreakout mirrors the "in foreign content" end-tag rule:
+	// these end tags are processed per "in body", which pops the svg
+	// element (e.g. "<h1><svg></h1>" closes the h1 in the tree builder).
+	// Same list as isBreakoutTag minus font, whose color/face/size rule
+	// is start-tag-only.
+	isForeignEndBreakout := func(tn string) bool {
+		switch tn {
+		case "b", "big", "blockquote", "body", "br", "center", "code",
+			"dd", "div", "dl", "dt", "em", "embed", "h1", "h2", "h3",
+			"h4", "h5", "h6", "head", "hr", "i", "img", "li", "listing",
+			"menu", "meta", "nobr", "ol", "p", "pre", "ruby", "s",
+			"small", "span", "strong", "strike", "sub", "sup", "table",
+			"tt", "u", "ul", "var":
+			return true
+		}
+		return false
+	}
 	// popElemTo truncates elemStack to length n, dropping capture frames
 	// whose element is gone. A dropped frame writes its field only if no
 	// same-tag frame remains open below it (the DOM walk visits the outer
@@ -691,6 +708,22 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 				if foreignDepth < 0 {
 					foreignDepth = 0
 				}
+			}
+			// Foreign-content end-tag breakout (x/net "in foreign content"):
+			// an end tag the in-body rules act on pops the svg element too
+			// (x/net's implied-start-tag mechanism routes </p> and </br>
+			// through the foreign start-tag breakout), so end the svg skip
+			// and fall through to normal end-tag handling instead of
+			// swallowing the token (fuzzer-found: "<h1><svg></h1>0" must
+			// close the h1, leaving it empty with "0" in the body). An end
+			// tag the tree builder ignores leaves foreign content open,
+			// so keep skipping.
+			if (skipTag == "svg" || capSkip == "svg") && isForeignEndBreakout(tn) && endTagActs(tn) {
+				skipTag, skipDepth = "", 0
+				capSkip, capSkipDepth = "", 0
+				// Breakout pops all foreign elements up to the HTML content
+				// (svg is never on elemStack, so nothing to pop there).
+				foreignDepth = 0
 			}
 			if skipTag != "" {
 				if tn == skipTag {

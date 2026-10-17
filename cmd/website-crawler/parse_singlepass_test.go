@@ -130,6 +130,15 @@ var differentialCorpus = map[string]string{
 	// while html.Parse coalesces it into one text node (found by fuzzing).
 	"truncated-tag-eof":   "0</",
 	"truncated-tag-eof-2": `<p>hello</`,
+	// Foreign-content end-tag breakout: an end tag the in-body rules act
+	// on pops the svg element (x/net routes </p> and </br> through the
+	// foreign start-tag breakout via implied tokens). The single-pass
+	// parser used to swallow these inside the svg skip (CI fuzz job
+	// found "<h1><svg></h1>0": H1/WordCount mismatch).
+	"svg-endtag-breakout":     `<h1><svg></h1>0`,
+	"svg-endtag-breakout-p":   `<svg>0</p>0</svg>`,
+	"svg-endtag-breakout-br":  `<svg>0</br>0</svg>`,
+	"svg-endtag-breakout-div": `<div><svg></div>0`,
 }
 
 // differentialCorpusQ5 holds the Track Q rung Q5 corpus extension (#283):

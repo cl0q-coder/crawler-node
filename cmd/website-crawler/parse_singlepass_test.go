@@ -211,6 +211,25 @@ var differentialCorpusQ5 = map[string]string{
 	"q5-nul-foreign-svg":  "<h1><svg>\x00",
 	"q5-nul-foreign-math": "<math>\x00</math>",
 	"q5-nul-html":         "<h1>a\x00b</h1>",
+	// Q5 fuzz regression: MATH foreign-content breakout — like svg, a
+	// breakout start tag pops foreign elements (here the math element)
+	// and reprocesses in body mode, so the NUL is dropped, not U+FFFD.
+	// CI fuzz found "<mAth><B>\x00": WordCount mismatch.
+	"q5-math-breakout":      "<mAth><B>\x00",
+	"q5-math-breakout-nest": "<math><mrow><b>\x00",
+	// Q5 fuzz regression: integration points are NOT foreign content —
+	// MathML text integration points (mi/mn/mo/ms/mtext) and HTML
+	// integration points (svg desc/foreignObject/title, math
+	// annotation-xml with text/html or application/xhtml+xml encoding)
+	// process text and start tags in body mode, so NUL is dropped and
+	// breakout tags inside them do not pop the foreign element.
+	"q5-math-ip-mi":        "<math><mi>\x00",
+	"q5-math-ip-mtext":     "<math><mtext>\x00",
+	"q5-math-ip-mglyph":    "<math><mi><mglyph>\x00",
+	"q5-math-ip-annoxml":   "<math><annotation-xml encoding=\"text/html\"><b>\x00",
+	"q5-math-ip-annoxml-2": "<math><annotation-xml><b>\x00",
+	"q5-svg-ip-breakout":   "<svg><foreignObject><b>0",
+	"q5-svg-ip-desc":       "<svg><desc>\x00</desc>",
 	// Q5 fuzz regression: html/head/body starts are structurally ignored
 	// by the tree builder (attributes merged at most), so they must not
 	// hide an open h1 from the h1 rule's top-of-stack check.

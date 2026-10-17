@@ -123,6 +123,10 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 	z := html.NewTokenizer(r)
 	var skipTag string // non-empty while inside a skipped subtree
 	skipDepth := 0
+	// svgIP tracks open HTML integration points (desc, foreignObject,
+	// title) inside a skipped svg subtree: breakout tags inside them do
+	// not end the svg skip. Cleared whenever the svg skip ends.
+	var svgIP []string
 	// title/h1 capture: mirrors textOf's pendingSpace collapse. A stack of
 	// frames (not a single slot) because the DOM walk treats <title> as a
 	// real element even inside <h1> — h1 is not RCDATA, so <h1><title>0 sets
@@ -232,22 +236,87 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 		}
 		return false
 	}
-	// foreignDepth counts open svg/math elements (even skipped ones): the
-	// tree builder substitutes U+FFFD for NUL bytes in foreign content
-	// instead of dropping them. Reset to 0 on svg breakout (which pops all
-	// foreign elements up to the HTML content).
-	foreignDepth := 0
-	// inForeign reports whether the current position is inside foreign
-	// content (an svg/math subtree), where the tree builder substitutes
-	// U+FFFD for NUL bytes instead of dropping them (x/net parse.go).
-	inForeign := func() bool { return foreignDepth > 0 }
+	// Foreign-content modeling mirrors x/net's tree builder
+	// (html/parse.go inForeignContent + parseForeignContent, html/foreign.go
+	// integration-point definitions). foreignStack tracks open foreign
+	// (svg/math namespace) elements — including skipped ones, since the
+	// skip only hides tokens from field extraction, not from foreign-ness.
+	// Each entry records its integration-point kind, which decides whether
+	// a token at that position is really "in foreign content":
+	//   - MathML text integration points (mi/mn/mo/ms/mtext): text and
+	//     non-mglyph/malignmark start tags are processed in body mode.
+	//   - HTML integration points (svg desc/foreignObject/title, math
+	//     annotation-xml with text/html or application/xhtml+xml
+	//     encoding): start tags and text are processed in body mode.
+	// elemIdx links a math entry to its position on elemStack (svg entries
+	// are skipped and never on elemStack: -1) so popElemTo can keep the
+	// two stacks in sync when body-mode closes pop foreign elements.
+	const (
+		foreignPlain    = iota // ordinary foreign element: content is foreign
+		foreignMathText        // MathML text integration point
+		foreignHTMLIP          // HTML integration point
+	)
+	type foreignElem struct {
+		tag     string // lowercased tag name
+		ns      string // "svg" or "math"
+		kind    int
+		elemIdx int // index on elemStack, or -1 when not on elemStack
+	}
+	var foreignStack []foreignElem
+	// classifyForeignKind classifies a math-namespace element for the
+	// integration-point rules. Reads the tag's attributes for the
+	// annotation-xml encoding check (callers must not have consumed them).
+	classifyForeignKind := func(tn string) int {
+		switch tn {
+		case "mi", "mn", "mo", "ms", "mtext":
+			return foreignMathText
+		case "annotation-xml":
+			more := true
+			for more {
+				var k, v []byte
+				k, v, more = z.TagAttr()
+				if equalFoldASCII(k, "encoding") &&
+					(strings.EqualFold(string(v), "text/html") ||
+						strings.EqualFold(string(v), "application/xhtml+xml")) {
+					return foreignHTMLIP
+				}
+			}
+		}
+		return foreignPlain
+	}
+	// inForeignText reports whether a text token at the current position
+	// is in foreign content (NUL -> U+FFFD instead of dropped).
+	inForeignText := func() bool {
+		if len(foreignStack) == 0 {
+			return false
+		}
+		return foreignStack[len(foreignStack)-1].kind == foreignPlain
+	}
+	// inForeignStart reports whether a start tag at the current position
+	// is processed in foreign content (vs body mode at an integration
+	// point). Used for the breakout decision and the foreign push.
+	inForeignStart := func(tn string) bool {
+		if len(foreignStack) == 0 {
+			return false
+		}
+		switch foreignStack[len(foreignStack)-1].kind {
+		case foreignMathText:
+			// mglyph/malignmark stay foreign inside text integration
+			// points; everything else is body mode (no pop).
+			return tn == "mglyph" || tn == "malignmark"
+		case foreignHTMLIP:
+			return false
+		default:
+			return true
+		}
+	}
 	// normText normalizes a text token the way the tree builder would:
 	// NUL -> U+FFFD in foreign content, NUL dropped elsewhere.
 	normText := func(data string) string {
 		if strings.IndexByte(data, 0) < 0 {
 			return data
 		}
-		if inForeign() {
+		if inForeignText() {
 			return strings.ReplaceAll(data, "\x00", "�")
 		}
 		return dropNUL(data)
@@ -309,6 +378,19 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			n = len(elemStack)
 		}
 		elemStack = elemStack[:n]
+		// Foreign elements popped from the element stack are gone from
+		// the tree builder's open-elements stack too: drop them from the
+		// foreign stack so NUL normalization stays in sync (e.g. a
+		// body-mode </div> closing over an open <math>). svg entries
+		// (elemIdx -1, never on elemStack) are managed by the svg skip
+		// logic and the svg/math end-tag walk instead.
+		for len(foreignStack) > 0 {
+			top := foreignStack[len(foreignStack)-1]
+			if top.elemIdx < 0 || top.elemIdx < n {
+				break
+			}
+			foreignStack = foreignStack[:len(foreignStack)-1]
+		}
 		kept := capStack[:0]
 		for _, fr := range capStack {
 			if fr.elemDepth > n {
@@ -492,11 +574,39 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			// element/capture purposes — but not for skip regions: an
 			// opened-and-closed <svg/> has no content to skip.
 			effStart := start || (tt == html.SelfClosingTagToken && !isVoidElem(tn))
-			// Track foreign-content depth for NUL normalization (counted
+			// Track foreign-content elements for NUL normalization (counted
 			// even for skipped subtrees — the skip only hides tokens from
-			// field extraction, not from foreign-ness).
+			// field extraction, not from foreign-ness). The elemIdx link to
+			// elemStack is fixed up at the element push below (svg entries
+			// are skipped and never land on elemStack: elemIdx stays -1).
 			if start && (tn == "svg" || tn == "math") {
-				foreignDepth++
+				foreignStack = append(foreignStack, foreignElem{tag: tn, ns: tn, kind: foreignPlain, elemIdx: -1})
+			}
+			// Math foreign-content breakout (x/net parseForeignContent):
+			// a breakout start tag (b, div, h1, ..., or font with
+			// color/face/size) pops foreign elements up to — not
+			// including — the nearest integration point or HTML content,
+			// then reprocesses the tag in body mode (which the normal
+			// flow below does). At an integration point the tag is
+			// already body-mode, so nothing pops (fuzzer-found:
+			// "<mAth><B>\x00" must drop the NUL like the tree builder).
+			// svg is always handled by the skip branch below, so this
+			// only fires for math here.
+			if skipTag != "svg" && capSkip != "svg" && inForeignStart(tn) && isBreakoutTag(tn) {
+				newDepth := len(elemStack)
+				for len(foreignStack) > 0 {
+					top := foreignStack[len(foreignStack)-1]
+					if top.kind != foreignPlain {
+						break
+					}
+					foreignStack = foreignStack[:len(foreignStack)-1]
+					if top.elemIdx >= 0 && top.elemIdx < newDepth {
+						newDepth = top.elemIdx
+					}
+				}
+				if newDepth < len(elemStack) {
+					popElemTo(newDepth)
+				}
 			}
 			// SVG foreign-content breakout: the tree builder pops an svg
 			// element and reprocesses breakout tags (b, div, h1, ...) as
@@ -514,7 +624,18 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 					}
 					continue
 				}
-				if start && isBreakoutTag(tn) {
+				// HTML integration points inside svg (desc, foreignObject,
+				// title): the tree builder processes their start tags and
+				// text in body mode WITHOUT popping the svg element, so a
+				// breakout tag inside one must not end the skip
+				// (fuzzer-found: "<svg><foreignObject><b>0" keeps the b
+				// inside the svg subtree — the DOM walk skips it all).
+				// Tag names are ASCII-lowercased, hence "foreignobject".
+				if start && (tn == "desc" || tn == "foreignobject" || tn == "title") {
+					svgIP = append(svgIP, tn)
+					continue
+				}
+				if start && len(svgIP) == 0 && isBreakoutTag(tn) {
 					if skipTag == "svg" {
 						skipTag, skipDepth = "", 0
 					} else {
@@ -523,7 +644,8 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 					// Breakout pops all foreign elements up to HTML content.
 					// (svg is never on elemStack — the skip continues before
 					// the push — so there is nothing to pop there.)
-					foreignDepth = 0
+					foreignStack = foreignStack[:0]
+					svgIP = svgIP[:0]
 				} else {
 					continue
 				}
@@ -607,6 +729,28 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 					}
 				}
 				elemStack = append(elemStack, tn)
+				// Mirror the tree builder's open-elements stack for foreign
+				// elements. A <math>/<svg> root was already pushed pre-skip
+				// above — link it to its element-stack position (svg is
+				// skipped and never lands here, so its elemIdx stays -1).
+				// Other math-namespace elements are foreign iff the token
+				// was processed in foreign mode (integration points are
+				// body mode and get no foreign entry). Self-closing tags
+				// are popped immediately by the tree builder, so they get
+				// none either.
+				if start && tn == "math" {
+					if n := len(foreignStack); n > 0 {
+						if top := &foreignStack[n-1]; top.tag == "math" && top.elemIdx == -1 {
+							top.elemIdx = len(elemStack) - 1
+						}
+					}
+				} else if start && len(foreignStack) > 0 &&
+					foreignStack[len(foreignStack)-1].ns == "math" && inForeignStart(tn) {
+					foreignStack = append(foreignStack, foreignElem{
+						tag: tn, ns: "math", kind: classifyForeignKind(tn),
+						elemIdx: len(elemStack) - 1,
+					})
+				}
 			}
 			switch tn {
 			case "title":
@@ -701,12 +845,17 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			if endTagActs(tn) {
 				flushTextRun() // element boundary ends the text run
 			}
-			// Foreign-content depth tracks the tree builder even inside
-			// skipped subtrees.
+			// Foreign-content stack tracks the tree builder even inside
+			// skipped subtrees. An svg/math end tag pops through foreign
+			// elements down to and including the matching tag, mirroring
+			// the tree builder's foreign end-tag walk.
 			if tn == "svg" || tn == "math" {
-				foreignDepth--
-				if foreignDepth < 0 {
-					foreignDepth = 0
+				for len(foreignStack) > 0 {
+					top := foreignStack[len(foreignStack)-1]
+					foreignStack = foreignStack[:len(foreignStack)-1]
+					if top.tag == tn {
+						break
+					}
 				}
 			}
 			// Foreign-content end-tag breakout (x/net "in foreign content"):
@@ -717,19 +866,26 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			// swallowing the token (fuzzer-found: "<h1><svg></h1>0" must
 			// close the h1, leaving it empty with "0" in the body). An end
 			// tag the tree builder ignores leaves foreign content open,
-			// so keep skipping.
-			if (skipTag == "svg" || capSkip == "svg") && isForeignEndBreakout(tn) && endTagActs(tn) {
+			// so keep skipping. Inside an HTML integration point the tree
+			// builder does not break out, so the skip stands.
+			if (skipTag == "svg" || capSkip == "svg") && len(svgIP) == 0 && isForeignEndBreakout(tn) && endTagActs(tn) {
 				skipTag, skipDepth = "", 0
 				capSkip, capSkipDepth = "", 0
 				// Breakout pops all foreign elements up to the HTML content
 				// (svg is never on elemStack, so nothing to pop there).
-				foreignDepth = 0
+				foreignStack = foreignStack[:0]
+				svgIP = svgIP[:0]
+			}
+			// Close HTML integration points tracked inside the svg skip.
+			if (skipTag == "svg" || capSkip == "svg") && len(svgIP) > 0 && svgIP[len(svgIP)-1] == tn {
+				svgIP = svgIP[:len(svgIP)-1]
 			}
 			if skipTag != "" {
 				if tn == skipTag {
 					skipDepth--
 					if skipDepth == 0 {
 						skipTag = ""
+						svgIP = svgIP[:0]
 					}
 				}
 				continue
@@ -739,6 +895,7 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 					capSkipDepth--
 					if capSkipDepth == 0 {
 						capSkip = ""
+						svgIP = svgIP[:0]
 					}
 				}
 				continue

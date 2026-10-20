@@ -11,15 +11,15 @@
 //     sets the threshold; nothing in the gate may act on an unmeasured
 //     verdict (SafeSearch lesson: never over-filter legit sites).
 //   - Guards against the classic false positives, in order of danger:
-//       1. JS-rendered legit pages show empty raw text. Empty text alone
-//          (0.55) stays UNDER threshold — corroboration is required.
-//       2. Articles *about* 404 handling mention "page not found" in prose.
-//          Body-text phrase matches count HALF weight; the title carries the
-//          signal on real soft-404 templates.
-//       3. "Coming soon" appears in legit prose ("our new store is coming
-//          soon"). Placeholder phrases are low-weight and need corroboration.
-//       4. Legit sparse pages (contact stubs) are thin but real. The thin
-//          corroboration only applies when the title is empty or ~= domain.
+//     1. JS-rendered legit pages show empty raw text. Empty text alone
+//     (0.55) stays UNDER threshold — corroboration is required.
+//     2. Articles *about* 404 handling mention "page not found" in prose.
+//     Body-text phrase matches count HALF weight; the title carries the
+//     signal on real soft-404 templates.
+//     3. "Coming soon" appears in legit prose ("our new store is coming
+//     soon"). Placeholder phrases are low-weight and need corroboration.
+//     4. Legit sparse pages (contact stubs) are thin but real. The thin
+//     corroboration only applies when the title is empty or ~= domain.
 package quality
 
 import "strings"

@@ -19,7 +19,7 @@ import (
 	"strings"
 	"time"
 
-	"cl0q/botid"
+	"codeberg.org/cl0qsearch/crawler-node/botid"
 )
 
 // ValidateIntRange reports whether v is inside [lo, hi].

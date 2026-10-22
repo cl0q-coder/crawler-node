@@ -46,8 +46,8 @@ import (
 
 	"golang.org/x/net/html"
 
-	"cl0q/crawlutil"
-	"cl0q/internal/simhash"
+	"codeberg.org/cl0qsearch/crawler-node/crawlutil"
+	"codeberg.org/cl0qsearch/crawler-node/internal/simhash"
 )
 
 // isSkipTag reports the subtrees the DOM walk never descends into.

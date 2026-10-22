@@ -36,9 +36,9 @@ import (
 	"testing"
 	"time"
 
-	"cl0q/internal/config"
-	"cl0q/netguard"
-	"cl0q/tools/bench-fixture"
+	"codeberg.org/cl0qsearch/crawler-node/internal/config"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/tools/bench-fixture"
 )
 
 const (

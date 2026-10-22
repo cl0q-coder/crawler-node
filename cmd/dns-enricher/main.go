@@ -27,9 +27,9 @@ import (
 	"syscall"
 	"time"
 
-	"cl0q/dbresil"
-	"cl0q/internal/config"
-	"cl0q/internal/version"
+	"codeberg.org/cl0qsearch/crawler-node/dbresil"
+	"codeberg.org/cl0qsearch/crawler-node/internal/config"
+	"codeberg.org/cl0qsearch/crawler-node/internal/version"
 	"github.com/lib/pq"
 	"golang.org/x/net/publicsuffix"
 )

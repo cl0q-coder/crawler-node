@@ -35,8 +35,8 @@ import (
 	"sync"
 	"time"
 
-	"cl0q/crawlutil"
-	"cl0q/dbresil"
+	"codeberg.org/cl0qsearch/crawler-node/crawlutil"
+	"codeberg.org/cl0qsearch/crawler-node/dbresil"
 )
 
 // item is one URL waiting in the BFS frontier.

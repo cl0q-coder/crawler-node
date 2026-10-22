@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"cl0q/internal/tunable"
+	"codeberg.org/cl0qsearch/crawler-node/internal/tunable"
 )
 
 // NR7: property-style etiquette conformance. These hammer the politeness

@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"cl0q/internal/simhash"
+	"codeberg.org/cl0qsearch/crawler-node/internal/simhash"
 )
 
 // refreshSecret is the node's enrollment secret (what the node holds).

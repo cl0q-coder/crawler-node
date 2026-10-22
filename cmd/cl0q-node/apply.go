@@ -53,8 +53,8 @@ import (
 	"strings"
 	"time"
 
-	"cl0q/internal/release"
-	"cl0q/internal/version"
+	"codeberg.org/cl0qsearch/crawler-node/internal/release"
+	"codeberg.org/cl0qsearch/crawler-node/internal/version"
 )
 
 // applyStateFile records the last successfully applied version so a stale

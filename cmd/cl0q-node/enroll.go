@@ -21,8 +21,8 @@ import (
 	"os"
 	"time"
 
-	"cl0q/botid"
-	"cl0q/internal/trust"
+	"codeberg.org/cl0qsearch/crawler-node/botid"
+	"codeberg.org/cl0qsearch/crawler-node/internal/trust"
 )
 
 type enrollRequest struct {

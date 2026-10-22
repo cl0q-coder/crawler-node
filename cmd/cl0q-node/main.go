@@ -44,10 +44,10 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"cl0q/botid"
-	"cl0q/internal/config"
-	"cl0q/internal/metrics"
-	"cl0q/internal/version"
+	"codeberg.org/cl0qsearch/crawler-node/botid"
+	"codeberg.org/cl0qsearch/crawler-node/internal/config"
+	"codeberg.org/cl0qsearch/crawler-node/internal/metrics"
+	"codeberg.org/cl0qsearch/crawler-node/internal/version"
 )
 
 func env(k, def string) string {

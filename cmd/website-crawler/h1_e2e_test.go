@@ -32,7 +32,7 @@ import (
 	"testing"
 	"time"
 
-	"cl0q/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
 
 	_ "github.com/lib/pq"
 )

@@ -20,7 +20,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"cl0q/crawlutil"
+	"codeberg.org/cl0qsearch/crawler-node/crawlutil"
 )
 
 // sitemapMaxBytes caps a single sitemap fetch. Sitemaps are XML; 5MB covers a

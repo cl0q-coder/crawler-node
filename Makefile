@@ -24,7 +24,7 @@ VERSION := $(shell cat VERSION)
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 BUILDTIME := $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 BINARIES := website-crawler domain-crawler dns-enricher asn-enricher cl0q-node preflight
-LDFLAGS := -s -w -X cl0q/internal/version.Version=$(VERSION) -X cl0q/internal/version.Commit=$(COMMIT) -X cl0q/internal/version.BuildTime=$(BUILDTIME)
+LDFLAGS := -s -w -X codeberg.org/cl0qsearch/crawler-node/internal/version.Version=$(VERSION) -X codeberg.org/cl0qsearch/crawler-node/internal/version.Commit=$(COMMIT) -X codeberg.org/cl0qsearch/crawler-node/internal/version.BuildTime=$(BUILDTIME)
 
 .PHONY: build dev-build test vet sbom docker release clean
 
@@ -43,7 +43,7 @@ build:
 dev-build:
 	mkdir -p dist
 	set -e; for c in $(BINARIES); do \
-		CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X cl0q/internal/version.Version=$(VERSION) -X cl0q/internal/version.Commit=dev-$(COMMIT) -X cl0q/internal/version.BuildTime=$(BUILDTIME)" -o dist/$$c ./cmd/$$c; \
+		CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X codeberg.org/cl0qsearch/crawler-node/internal/version.Version=$(VERSION) -X codeberg.org/cl0qsearch/crawler-node/internal/version.Commit=dev-$(COMMIT) -X codeberg.org/cl0qsearch/crawler-node/internal/version.BuildTime=$(BUILDTIME)" -o dist/$$c ./cmd/$$c; \
 	done
 	@echo "dev-built $(VERSION): $$(ls dist/)"
 

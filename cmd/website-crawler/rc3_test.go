@@ -15,7 +15,7 @@ import (
 
 	"golang.org/x/net/html"
 
-	"cl0q/internal/tunable"
+	"codeberg.org/cl0qsearch/crawler-node/internal/tunable"
 )
 
 // Pruning keeps a gate that is still enforcing a gap, and drops (and marks dead) one idle past gateIdle.

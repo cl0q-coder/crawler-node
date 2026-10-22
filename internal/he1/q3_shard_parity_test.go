@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"cl0q/crawlutil"
+	"codeberg.org/cl0qsearch/crawler-node/crawlutil"
 )
 
 // q3GoldenDomains is the fixed corpus for the golden test. The expected

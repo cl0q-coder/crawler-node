@@ -22,7 +22,7 @@ import (
 	"syscall"
 	"time"
 
-	"cl0q/tools/bench-fixture"
+	"codeberg.org/cl0qsearch/crawler-node/tools/bench-fixture"
 )
 
 func main() {

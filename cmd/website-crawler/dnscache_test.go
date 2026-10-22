@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"cl0q/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
 )
 
 func stubLookup(addrs []net.IPAddr, err error) (func(context.Context, string) ([]net.IPAddr, error), *int) {

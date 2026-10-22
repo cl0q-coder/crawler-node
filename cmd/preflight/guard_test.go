@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"cl0q/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
 )
 
 // TestGuardedClientRefusesNonPublic asserts the preflight HTTP client carries

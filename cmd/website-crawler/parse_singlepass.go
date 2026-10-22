@@ -508,6 +508,15 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			return inScope(scopeDefault, tn)
 		case isScopeCloser(tn):
 			return inScope(scopeDefault, tn)
+		case tn == "applet" || tn == "marquee" || tn == "object":
+			// x/net inBodyIM has a dedicated case for these three
+			// (a.Applet/a.Marquee/a.Object): popUntil in default scope.
+			// They act even with a special element open above them —
+			// e.g. "<object><p>0</object>0" splits the text in the DOM,
+			// where the EndTagOther walk below would stop at the <p>
+			// and wrongly call the end tag ignored (fuzzer-found:
+			// FuzzParseSinglePass 9cd3454579a36469).
+			return inScope(scopeDefault, tn)
 		default:
 			// inBodyEndTagOther: acts iff tn is found walking down
 			// before the first special element; otherwise ignored.
@@ -917,6 +926,14 @@ func parseHTMLSinglePass(r io.Reader, info *WebsiteInfo, domain string) {
 			case isScopeCloser(tn):
 				// address..ul case (x/net inBodyIM): implied end tags,
 				// then popUntil in default scope.
+				genImpliedEnds()
+				popUntilScope(scopeDefault, tn)
+			case tn == "applet" || tn == "marquee" || tn == "object":
+				// Dedicated x/net inBodyIM case (a.Applet/a.Marquee/
+				// a.Object): popUntil in default scope — NOT the
+				// EndTagOther walk, which stops at the first special
+				// element and would leave e.g. an open <p> inside
+				// <object> unclosed (fuzzer-found, see endTagActs).
 				genImpliedEnds()
 				popUntilScope(scopeDefault, tn)
 			default:

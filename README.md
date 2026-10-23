@@ -15,7 +15,7 @@ politely, and sends what it finds to cl0q's index. The search engine itself is n
 ```bash
 cp .env.example .env   # fill in DB_PASSWORD
 docker compose build
-docker compose run --rm cl0q-node enroll --contact you@example.com  # one-command enrol
+docker compose run --rm --entrypoint /usr/local/bin/cl0q-node node enroll --contact you@example.com  # one-command enrol
 docker compose run --rm preflight   # self-check: all six must PASS
 docker compose up -d
 docker compose logs -f website-crawler node

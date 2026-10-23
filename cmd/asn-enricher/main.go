@@ -33,10 +33,10 @@ import (
 
 	"github.com/lib/pq"
 
-	"cl0q/dbresil"
-	"cl0q/internal/config"
-	"cl0q/internal/version"
-	"cl0q/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/dbresil"
+	"codeberg.org/cl0qsearch/crawler-node/internal/config"
+	"codeberg.org/cl0qsearch/crawler-node/internal/version"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
 )
 
 // validateConfig checks every knob at startup (NR2). A bad value is a FATAL

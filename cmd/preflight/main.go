@@ -25,10 +25,10 @@ import (
 
 	_ "github.com/lib/pq"
 
-	"cl0q/internal/config"
-	"cl0q/internal/version"
-	"cl0q/netguard"
-	"cl0q/robotstxt"
+	"codeberg.org/cl0qsearch/crawler-node/internal/config"
+	"codeberg.org/cl0qsearch/crawler-node/internal/version"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/robotstxt"
 )
 
 type checkResult struct {

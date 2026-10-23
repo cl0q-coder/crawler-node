@@ -30,7 +30,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"cl0q/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
 )
 
 // n2Refused: every (prefix, sample addresses) pair below comes from a

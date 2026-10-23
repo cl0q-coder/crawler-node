@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"cl0q/internal/release"
+	"codeberg.org/cl0qsearch/crawler-node/internal/release"
 )
 
 func testUpdateManifest() *release.Manifest {

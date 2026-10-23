@@ -30,8 +30,8 @@ import (
 	"os"
 	"time"
 
-	"cl0q/internal/release"
-	"cl0q/internal/version"
+	"codeberg.org/cl0qsearch/crawler-node/internal/release"
+	"codeberg.org/cl0qsearch/crawler-node/internal/version"
 )
 
 // provisionalManifestURL is where rung U5 will publish releases.json. The

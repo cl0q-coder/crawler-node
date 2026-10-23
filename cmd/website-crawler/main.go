@@ -47,7 +47,7 @@ package main
 
 import (
 	"bytes"
-	"cl0q/internal/daily"
+	"codeberg.org/cl0qsearch/crawler-node/internal/daily"
 	"context"
 	"crypto/tls"
 	"database/sql"
@@ -80,19 +80,19 @@ import (
 	"golang.org/x/net/html/charset"
 	"golang.org/x/net/publicsuffix"
 
-	"cl0q/crawlutil"
-	"cl0q/dbresil"
-	"cl0q/internal/config"
-	"cl0q/internal/footprint"
-	"cl0q/internal/metrics"
-	"cl0q/internal/quality"
-	"cl0q/internal/simhash"
-	"cl0q/internal/sitemap"
-	"cl0q/internal/tunable"
-	"cl0q/internal/version"
-	"cl0q/internal/warc"
-	"cl0q/netguard"
-	"cl0q/robotstxt"
+	"codeberg.org/cl0qsearch/crawler-node/crawlutil"
+	"codeberg.org/cl0qsearch/crawler-node/dbresil"
+	"codeberg.org/cl0qsearch/crawler-node/internal/config"
+	"codeberg.org/cl0qsearch/crawler-node/internal/footprint"
+	"codeberg.org/cl0qsearch/crawler-node/internal/metrics"
+	"codeberg.org/cl0qsearch/crawler-node/internal/quality"
+	"codeberg.org/cl0qsearch/crawler-node/internal/simhash"
+	"codeberg.org/cl0qsearch/crawler-node/internal/sitemap"
+	"codeberg.org/cl0qsearch/crawler-node/internal/tunable"
+	"codeberg.org/cl0qsearch/crawler-node/internal/version"
+	"codeberg.org/cl0qsearch/crawler-node/internal/warc"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/robotstxt"
 )
 
 // -------------------- Per-host politeness --------------------

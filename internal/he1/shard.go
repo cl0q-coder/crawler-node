@@ -25,7 +25,7 @@ import (
 	"sync"
 	"time"
 
-	"cl0q/crawlutil"
+	"codeberg.org/cl0qsearch/crawler-node/crawlutil"
 )
 
 // ProtocolVersion is the wire version this client speaks. Nodes advertise it

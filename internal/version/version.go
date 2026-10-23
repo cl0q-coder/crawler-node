@@ -1,5 +1,5 @@
 // Package version holds the node release version, stamped at build time
-// via -ldflags "-X cl0q/internal/version.Version=... -X cl0q/internal/version.Commit=... -X cl0q/internal/version.BuildTime=...".
+// via -ldflags "-X codeberg.org/cl0qsearch/crawler-node/internal/version.Version=... -X codeberg.org/cl0qsearch/crawler-node/internal/version.Commit=... -X codeberg.org/cl0qsearch/crawler-node/internal/version.BuildTime=...".
 // Defaults are "dev"/"unknown" for un-stamped builds.
 //
 // The provenance model (Track O, O2/O3): a stamp is only meaningful when it

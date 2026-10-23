@@ -55,13 +55,13 @@ import (
 	"github.com/lib/pq"
 	"golang.org/x/net/html"
 
-	"cl0q/crawlutil"
-	"cl0q/dbresil"
-	"cl0q/internal/config"
-	"cl0q/internal/footprint"
-	"cl0q/internal/version"
-	"cl0q/netguard"
-	"cl0q/robotstxt"
+	"codeberg.org/cl0qsearch/crawler-node/crawlutil"
+	"codeberg.org/cl0qsearch/crawler-node/dbresil"
+	"codeberg.org/cl0qsearch/crawler-node/internal/config"
+	"codeberg.org/cl0qsearch/crawler-node/internal/footprint"
+	"codeberg.org/cl0qsearch/crawler-node/internal/version"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/robotstxt"
 )
 
 func envOr(k, def string) string {

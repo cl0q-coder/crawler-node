@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"cl0q/internal/simhash"
+	"codeberg.org/cl0qsearch/crawler-node/internal/simhash"
 	"github.com/lib/pq"
 )
 

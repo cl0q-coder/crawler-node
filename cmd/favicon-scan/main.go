@@ -38,7 +38,7 @@ import (
 	"sync"
 	"time"
 
-	"cl0q/dbresil"
+	"codeberg.org/cl0qsearch/crawler-node/dbresil"
 
 	_ "github.com/lib/pq"
 )

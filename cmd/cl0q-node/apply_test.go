@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"cl0q/internal/release"
+	"codeberg.org/cl0qsearch/crawler-node/internal/release"
 )
 
 // setStdin swaps os.Stdin for a pipe containing input; returns the original

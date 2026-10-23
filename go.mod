@@ -1,4 +1,4 @@
-module cl0q
+module codeberg.org/cl0qsearch/crawler-node
 
 go 1.26.10
 

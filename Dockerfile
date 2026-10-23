@@ -14,7 +14,7 @@ COPY . .
 
 RUN set -eux; mkdir -p /out; \
     for c in website-crawler domain-crawler dns-enricher asn-enricher cl0q-node preflight; do \
-        CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X cl0q/internal/version.Version=$VERSION" -o "/out/$c" "./cmd/$c"; \
+        CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X codeberg.org/cl0qsearch/crawler-node/internal/version.Version=$VERSION" -o "/out/$c" "./cmd/$c"; \
     done
 
 #############################  runtime  #############################

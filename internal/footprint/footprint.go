@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"cl0q/internal/config"
+	"codeberg.org/cl0qsearch/crawler-node/internal/config"
 )
 
 // caps is the evaluated state from one size check.

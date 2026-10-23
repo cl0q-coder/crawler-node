@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"cl0q/internal/release"
+	"codeberg.org/cl0qsearch/crawler-node/internal/release"
 )
 
 // statusTestManifest builds a manifest with a yanked old release.

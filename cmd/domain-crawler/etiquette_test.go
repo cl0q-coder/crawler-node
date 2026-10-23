@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"cl0q/botid"
-	"cl0q/crawlutil"
-	"cl0q/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/botid"
+	"codeberg.org/cl0qsearch/crawler-node/crawlutil"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
 )
 
 // The fake servers below listen on 127.0.0.1, which netguard refuses; the guard is switched off inside this test

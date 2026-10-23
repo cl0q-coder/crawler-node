@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"cl0q/botid"
-	"cl0q/crawlutil"
-	"cl0q/internal/tunable"
-	"cl0q/netguard"
-	"cl0q/robotstxt"
+	"codeberg.org/cl0qsearch/crawler-node/botid"
+	"codeberg.org/cl0qsearch/crawler-node/crawlutil"
+	"codeberg.org/cl0qsearch/crawler-node/internal/tunable"
+	"codeberg.org/cl0qsearch/crawler-node/netguard"
+	"codeberg.org/cl0qsearch/crawler-node/robotstxt"
 )
 
 // connCounter accepts TCP connections and records when each arrived; handle decides what to do with it.
